@@ -327,11 +327,13 @@ class GSplatOctree {
         const dim = resource.streams.textureDimensions;
         const data = new ArrayType(dim.x * dim.y);
 
-        // Each file corresponds to exactly one LOD level — go directly to that LOD
-        const lodLevel = this.files[fileIndex].lodLevel;
+        // Flat mode: each file represents one LoD tier; index into node.lods[lodLevel].
+        // Tree mode: every node has exactly one LoD entry at index 0; tree depth is tracked
+        // separately on the node itself, not by lod-index position.
+        const lodLevel = this.hierarchyMode === 'tree' ? 0 : this.files[fileIndex].lodLevel;
         for (let nodeIndex = 0; nodeIndex < numNodes; nodeIndex++) {
             const lod = this.nodes[nodeIndex].lods[lodLevel];
-            if (lod.fileIndex === fileIndex) {
+            if (lod && lod.fileIndex === fileIndex) {
                 for (let i = 0; i < lod.count; i++) {
                     data[lod.offset + i] = nodeIndex;
                 }
