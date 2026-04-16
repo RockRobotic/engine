@@ -382,6 +382,10 @@ class GSplatOctreeInstance {
      * @returns {number} Desired LOD index to display.
      */
     selectDesiredLodIndex(node, optimalLodIndex, maxLod, lodUnderfillLimit) {
+        // Hidden nodes (tree-mode: optimalLodIndex = -1 means the selector
+        // descended past this node) have no LoD to select. Return the sentinel
+        // so applyLodChanges treats the node as invisible.
+        if (optimalLodIndex < 0) return optimalLodIndex;
         if (lodUnderfillLimit > 0) {
             const allowedMaxCoarseLod = Math.min(maxLod, optimalLodIndex + lodUnderfillLimit);
 
