@@ -105,6 +105,32 @@ class GSplatOctree {
     cooldownTicks = 100;
 
     /**
+     * Hierarchy mode. `"flat"` (default) uses leaf-only LoD pyramids; `"tree"`
+     * retains every LCC2 node with a single LoD each and the tree structure.
+     *
+     * @type {"flat" | "tree"}
+     */
+    hierarchyMode = 'flat';
+
+    /**
+     * Index of the root node in `nodes[]`. Only populated in tree mode.
+     * @type {number}
+     */
+    rootIndex = -1;
+
+    /**
+     * Total authored LoD levels (max tree depth in tree mode; `lodLevels` in flat mode).
+     * @type {number}
+     */
+    totalLevels = 0;
+
+    /**
+     * Scene-level metadata from LCC2 (virtualLoD, lodSplats, etc.) — pass-through only.
+     * @type {Object|null}
+     */
+    metadata = null;
+
+    /**
      * @param {string} assetFileUrl - The file URL of the container asset.
      * @param {Object} data - The parsed JSON data containing info, filenames and tree.
      */
@@ -112,6 +138,9 @@ class GSplatOctree {
 
         this.lodLevels = data.lodLevels;
         this.assetFileUrl = assetFileUrl;
+        this.hierarchyMode = data.hierarchyMode ?? 'flat';
+        this.totalLevels = data.totalLevels ?? data.lodLevels;
+        this.metadata = data.metadata ?? null;
 
         // expand all file paths to full URLs upfront to avoid repeated joins later
         const baseDir = path.getDirectory(assetFileUrl);
@@ -130,41 +159,47 @@ class GSplatOctree {
                 data.environment;
         }
 
-        // Extract leaf nodes from hierarchical tree structure
-        const leafNodes = [];
-        this._extractLeafNodes(data.tree, leafNodes);
+        if (this.hierarchyMode === 'tree') {
+            // Tree mode: retain every node with single LoD entry each.
+            this.nodes = [];
+            this.rootIndex = this._buildTree(data.tree, -1);
+        } else {
+            // Flat mode (existing behaviour): extract leaves only.
+            const leafNodes = [];
+            this._extractLeafNodes(data.tree, leafNodes);
 
-        // Create nodes from the extracted leaf nodes
-        this.nodes = leafNodes.map((nodeData) => {
-            /** @type {GSplatOctreeNodeLod[]} */
-            const lods = [];
+            // Create nodes from the extracted leaf nodes
+            this.nodes = leafNodes.map((nodeData) => {
+                /** @type {GSplatOctreeNodeLod[]} */
+                const lods = [];
 
-            // Ensure we have exactly lodLevels entries
-            for (let i = 0; i < this.lodLevels; i++) {
-                const lodData = nodeData.lods[i.toString()];
-                if (lodData) {
-                    lods.push({
-                        file: this.files[lodData.file].url || '',
-                        fileIndex: lodData.file,
-                        offset: lodData.offset || 0,
-                        count: lodData.count || 0
-                    });
+                // Ensure we have exactly lodLevels entries
+                for (let i = 0; i < this.lodLevels; i++) {
+                    const lodData = nodeData.lods[i.toString()];
+                    if (lodData) {
+                        lods.push({
+                            file: this.files[lodData.file].url || '',
+                            fileIndex: lodData.file,
+                            offset: lodData.offset || 0,
+                            count: lodData.count || 0
+                        });
 
-                    // record LOD level for the file index
-                    this.files[lodData.file].lodLevel = i;
-                } else {
-                    // Missing LOD entry - fill with defaults
-                    lods.push({
-                        file: '',
-                        fileIndex: -1,
-                        offset: 0,
-                        count: 0
-                    });
+                        // record LOD level for the file index
+                        this.files[lodData.file].lodLevel = i;
+                    } else {
+                        // Missing LOD entry - fill with defaults
+                        lods.push({
+                            file: '',
+                            fileIndex: -1,
+                            offset: 0,
+                            count: 0
+                        });
+                    }
                 }
-            }
 
-            return new GSplatOctreeNode(lods, nodeData.bound);
-        });
+                return new GSplatOctreeNode(lods, nodeData.bound);
+            });
+        }
     }
 
     /**
@@ -205,6 +240,46 @@ class GSplatOctree {
             const loadedSummary = Array.from({ length: maxLod + 1 }, (_, i) => loadedCounts.get(i) || 0).join(' / ');
             Debug.trace(TRACEID_OCTREE_RESOURCES, `${this.assetFileUrl}: LOD resources in memory: ${loadedSummary}`);
         });
+    }
+
+    /**
+     * Recursively builds the tree-mode node list. Appends nodes to `this.nodes` in
+     * DFS order and returns the index of the just-added node.
+     *
+     * @param {Object} nodeData - A tree node from the translated LCC2 JSON.
+     * @param {number} parentIndex - Index of the parent node, or -1 for root.
+     * @returns {number} Index of this node in `this.nodes`.
+     * @private
+     */
+    _buildTree(nodeData, parentIndex) {
+        // Build a single LoD entry per node. Null lod → invisible sentinel.
+        const lodData = nodeData.lod;
+        /** @type {GSplatOctreeNodeLod[]} */
+        const lods = [{
+            file: lodData ? (this.files[lodData.file]?.url || '') : '',
+            fileIndex: lodData ? lodData.file : -1,
+            offset: lodData ? (lodData.offset || 0) : 0,
+            count: lodData ? (lodData.count || 0) : 0
+        }];
+        if (lodData && this.files[lodData.file]) {
+            this.files[lodData.file].lodLevel = nodeData.depth;
+        }
+
+        const node = new GSplatOctreeNode(lods, nodeData.bound);
+        node.depth = nodeData.depth ?? 0;
+        node.parent = parentIndex;
+
+        const myIndex = this.nodes.length;
+        this.nodes.push(node);
+
+        const childIndices = [];
+        const children = nodeData.children ?? [];
+        for (const child of children) {
+            childIndices.push(this._buildTree(child, myIndex));
+        }
+        node.children = childIndices;
+
+        return myIndex;
     }
 
     /**
