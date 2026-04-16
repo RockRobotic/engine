@@ -93,3 +93,43 @@ test('tree selector: root with null lod never enters active set', async () => {
 
     assert.ok(!active.includes(0), 'root (index 0) must not be active');
 });
+
+test('tree selector: hysteresis keeps the previously chosen depth within deadband', async () => {
+    const { selectTreeActiveNodes } = await import(
+        '../../../src/scene/gsplat-unified/gsplat-octree-instance.js'
+    );
+    const oct = new GSplatOctree('file:///scene.lcc2', makeTree());
+
+    const firstFrame = selectTreeActiveNodes(oct, {
+        cameraPos: { x: -50, y: -50, z: -50 },
+        lodBaseDistance: 10,
+        lodMultiplier: 2,
+        fovScale: 1
+    });
+    const prev = new Set(firstFrame);
+
+    const justBeyond = selectTreeActiveNodes(oct, {
+        cameraPos: { x: -55, y: -55, z: -55 },
+        lodBaseDistance: 10,
+        lodMultiplier: 2,
+        fovScale: 1,
+        previousActive: prev,
+        hysteresis: 0.15
+    });
+    assert.deepEqual(
+        justBeyond.map(i => oct.nodes[i].depth).sort(),
+        firstFrame.map(i => oct.nodes[i].depth).sort(),
+        'within 15% deadband, depth selection unchanged'
+    );
+
+    const past = selectTreeActiveNodes(oct, {
+        cameraPos: { x: 0, y: 0, z: 1000 },
+        lodBaseDistance: 10,
+        lodMultiplier: 2,
+        fovScale: 1,
+        previousActive: prev,
+        hysteresis: 0.15
+    });
+    const pastDepths = past.map(i => oct.nodes[i].depth);
+    assert.ok(pastDepths.every(d => d <= 1), 'past deadband, coarsened to depth <=1');
+});

@@ -221,6 +221,15 @@ class GSplatOctreeInstance {
     _deviceLostEvent = null;
 
     /**
+     * Indices of nodes that were active last frame. Used by the tree-mode
+     * selector to apply hysteresis and avoid flicker at depth transitions.
+     *
+     * @type {Set<number>|null}
+     * @private
+     */
+    _treePreviousActive = null;
+
+    /**
      * @param {GraphicsDevice} device - The graphics device.
      * @param {GSplatOctree} octree - The octree.
      * @param {GSplatPlacement} placement - The placement.
@@ -591,8 +600,13 @@ class GSplatOctreeInstance {
             cameraPos: { x: localCameraPosition.x, y: localCameraPosition.y, z: localCameraPosition.z },
             lodBaseDistance,
             lodMultiplier,
-            fovScale
+            fovScale,
+            previousActive: this._treePreviousActive,
+            hysteresis: 0.15
         });
+
+        // Update cache for next frame.
+        this._treePreviousActive = new Set(active);
 
         let totalSplats = 0;
         for (const idx of active) {
@@ -1074,7 +1088,12 @@ const _selectorClosest = new Vec3();
  * @returns {number[]} Indices into `octree.nodes` that should render.
  */
 export function selectTreeActiveNodes(octree, args) {
-    const { cameraPos, lodBaseDistance, lodMultiplier, fovScale = 1 } = args;
+    const {
+        cameraPos, lodBaseDistance, lodMultiplier,
+        fovScale = 1,
+        previousActive = null,
+        hysteresis = 0
+    } = args;
     _selectorPos.set(cameraPos.x, cameraPos.y, cameraPos.z);
 
     const totalLevels = octree.totalLevels;
@@ -1096,6 +1115,20 @@ export function selectTreeActiveNodes(octree, args) {
         } else {
             const coarseSteps = Math.log(fovAdjusted / lodBaseDistance) * invLogMult;
             targetDepth = Math.max(1, totalLevels - (coarseSteps | 0));
+        }
+
+        // Apply hysteresis: if this node was active last frame, defer coarsening
+        // until distance grows past (1 + hysteresis)x the threshold.
+        if (previousActive && previousActive.has(nodeIndex) && hysteresis > 0) {
+            const deadbandAdjusted = fovAdjusted / (1 + hysteresis);
+            let adjustedTarget;
+            if (deadbandAdjusted < lodBaseDistance) {
+                adjustedTarget = totalLevels;
+            } else {
+                const steps = Math.log(deadbandAdjusted / lodBaseDistance) * invLogMult;
+                adjustedTarget = Math.max(1, totalLevels - (steps | 0));
+            }
+            if (adjustedTarget > targetDepth) targetDepth = adjustedTarget;
         }
 
         const isLeaf = node.children.length === 0;
