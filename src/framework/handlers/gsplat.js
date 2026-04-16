@@ -4,6 +4,7 @@ import { ResourceHandler } from './handler.js';
 import { SogParser } from '../parsers/sog.js';
 import { SogBundleParser } from '../parsers/sog-bundle.js';
 import { GSplatOctreeParser } from '../parsers/gsplat-octree.js';
+import { Lcc2Parser } from '../parsers/lcc2.js';
 
 /**
  * @import { AppBase } from '../app-base.js'
@@ -22,7 +23,8 @@ class GSplatHandler extends ResourceHandler {
             ply: new PlyParser(app, 3),
             sog: new SogBundleParser(app),
             json: new SogParser(app, 3),
-            octree: new GSplatOctreeParser(app, 3)
+            octree: new GSplatOctreeParser(app, 3),
+            lcc2: new Lcc2Parser(app, 3)
         };
     }
 
