@@ -77,3 +77,25 @@ test('GSplatOctree flat mode: unchanged behaviour when hierarchyMode absent', ()
     assert.equal(oct.nodes.length, 1, 'only 1 leaf in flat mode');
     assert.equal(oct.nodes[0].lods.length, 2);
 });
+
+import { GSplatOctreeResource } from '../../../src/scene/gsplat-unified/gsplat-octree.resource.js';
+
+test('GSplatOctreeResource: exposes hierarchyMode and metadata from tree data', () => {
+    const data = {
+        hierarchyMode: 'tree',
+        lodLevels: 1,
+        totalLevels: 2,
+        metadata: { virtualLoD: null, lodSplats: [100, 50] },
+        filenames: ['a.sog'],
+        tree: {
+            bound: { min: [0, 0, 0], max: [1, 1, 1] },
+            lod: { file: 0, offset: 0, count: 100 },
+            depth: 0,
+            children: []
+        }
+    };
+    const fakeAssetLoader = { load() {}, unload() {}, getResource() { return null; }, destroy() {} };
+    const res = new GSplatOctreeResource('file:///scene.lcc2', data, fakeAssetLoader);
+    assert.equal(res.hierarchyMode, 'tree');
+    assert.deepEqual(res.metadata, { virtualLoD: null, lodSplats: [100, 50] });
+});
