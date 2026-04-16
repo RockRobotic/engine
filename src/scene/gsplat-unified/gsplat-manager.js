@@ -1260,12 +1260,24 @@ class GSplatManager {
         // Adapt _budgetScale to bring LOD estimates closer to budget by uniformly shifting
         // all LOD boundaries. Larger base distance → more nodes at LOD 0 → more splats, so:
         // under budget (ratio < 1) → increase scale, over budget (ratio > 1) → decrease scale.
-        // The scale intentionally targets ~60-140% of budget (wide dead zone), leaving the
-        // balancer to handle the remaining gap with per-node adjustments.
+        //
+        // Flat mode: wide dead zone (60-140% of budget) leaves the balancer to handle the
+        // remaining gap with per-node adjustments.
+        //
+        // Tree mode (LCC2): the per-node balancer is a no-op (each node has a single LoD), so
+        // the distance scale has to do all the work. Use a tight dead zone and higher blend rate
+        // to converge faster and tighter.
+        let hasTreeMode = false;
+        for (const [, inst] of this.octreeInstances) {
+            if (inst.octree.hierarchyMode === 'tree') {
+                hasTreeMode = true;
+                break;
+            }
+        }
         if (totalOptimalSplats > 0) {
             const ratio = totalOptimalSplats / adjustedBudget;
-            const budgetScaleDeadZone = 0.4;
-            const budgetScaleBlendRate = 0.3;
+            const budgetScaleDeadZone = hasTreeMode ? 0.05 : 0.4;
+            const budgetScaleBlendRate = hasTreeMode ? 0.7 : 0.3;
             if (ratio > 1 + budgetScaleDeadZone || ratio < 1 - budgetScaleDeadZone) {
                 const invCorrection = 1 / Math.sqrt(ratio);
                 this._budgetScale *= 1 + (invCorrection - 1) * budgetScaleBlendRate;
