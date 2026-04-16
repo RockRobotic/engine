@@ -130,7 +130,11 @@ class Lcc2Parser {
         const options = {
             retry: this.maxRetries > 0,
             maxRetries: this.maxRetries,
-            responseType: Http.ResponseType.JSON
+            responseType: Http.ResponseType.JSON,
+            // Send cookies so CloudFront signed-cookie-protected URLs work.
+            // Safe for non-credentialed origins: browser only attaches cookies
+            // the origin actually has.
+            withCredentials: true
         };
 
         http.get(url.load, options, (err, lcc2) => {
