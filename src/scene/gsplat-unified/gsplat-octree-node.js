@@ -33,6 +33,30 @@ class GSplatOctreeNode {
     boundingSphere = new Vec4();
 
     /**
+     * Tree depth of this node (0 = root). -1 when unused (flat-mode scenes).
+     * Populated only in hierarchical (LCC2) mode.
+     *
+     * @type {number}
+     */
+    depth = -1;
+
+    /**
+     * Index of the parent node in `GSplatOctree.nodes`, or -1 if no parent.
+     * Populated only in hierarchical mode.
+     *
+     * @type {number}
+     */
+    parent = -1;
+
+    /**
+     * Indices of child nodes in `GSplatOctree.nodes`. Empty for leaves and
+     * in flat-mode scenes.
+     *
+     * @type {number[]}
+     */
+    children = [];
+
+    /**
      * @param {GSplatOctreeNodeLod[]} lods - The LOD data for this node
      * @param {Object} [boundData] - The bounding box data with min and max arrays
      */
