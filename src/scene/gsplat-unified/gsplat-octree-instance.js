@@ -221,15 +221,6 @@ class GSplatOctreeInstance {
     _deviceLostEvent = null;
 
     /**
-     * Indices of nodes that were active last frame. Used by the tree-mode
-     * selector to apply hysteresis and avoid flicker at depth transitions.
-     *
-     * @type {Set<number>|null}
-     * @private
-     */
-    _treePreviousActive = null;
-
-    /**
      * @param {GraphicsDevice} device - The graphics device.
      * @param {GSplatOctree} octree - The octree.
      * @param {GSplatPlacement} placement - The placement.
@@ -600,21 +591,15 @@ class GSplatOctreeInstance {
             nodeInfos[i].optimalLod = -1;
         }
 
+        // Hysteresis (deadband on depth transitions) is intentionally off — a stale value
+        // from the previous frame would fight budget-driven coarsening and stall convergence.
+        // Camera-motion flicker can be re-introduced later as budget-aware conditional hysteresis.
         const active = selectTreeActiveNodes(this.octree, {
             cameraPos: { x: localCameraPosition.x, y: localCameraPosition.y, z: localCameraPosition.z },
             lodBaseDistance,
             lodMultiplier,
-            fovScale,
-            previousActive: this._treePreviousActive,
-            // Hysteresis (deadband on depth transitions) disabled for now — it fought
-            // budget-driven coarsening and caused splat count to plateau above budget.
-            // Camera-motion flicker will be addressed by conditional hysteresis later if
-            // it shows up during use.
-            hysteresis: 0
+            fovScale
         });
-
-        // Update cache for next frame.
-        this._treePreviousActive = new Set(active);
 
         let totalSplats = 0;
         for (const idx of active) {
