@@ -115,6 +115,7 @@
   },
   "scripts": {
     "build": "node build.mjs",
+    "prepare": "node build.mjs",
     "build:release": "npm run build target:release",
     "build:debug": "npm run build target:debug",
     "build:profiler": "npm run build target:profiler",
