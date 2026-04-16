@@ -606,7 +606,11 @@ class GSplatOctreeInstance {
             lodMultiplier,
             fovScale,
             previousActive: this._treePreviousActive,
-            hysteresis: 0.15
+            // Hysteresis (deadband on depth transitions) disabled for now — it fought
+            // budget-driven coarsening and caused splat count to plateau above budget.
+            // Camera-motion flicker will be addressed by conditional hysteresis later if
+            // it shows up during use.
+            hysteresis: 0
         });
 
         // Update cache for next frame.
