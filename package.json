@@ -1,6 +1,6 @@
 {
   "name": "@rockrobotic/playcanvas",
-  "version": "2.17.2-rock.0",
+  "version": "2.17.2-rock.1",
   "author": "PlayCanvas <support@playcanvas.com>",
   "homepage": "https://playcanvas.com",
   "description": "PlayCanvas WebGL game engine",
@@ -33,32 +33,10 @@
   "exports": {
     ".": {
       "types": "./build/playcanvas.d.ts",
-      "development": {
-        "import": "./build/playcanvas.dbg/src/index.js",
-        "require": "./build/playcanvas.dbg.js"
-      },
-      "profiler": {
-        "import": "./build/playcanvas.prf/src/index.js",
-        "require": "./build/playcanvas.prf.js"
-      },
-      "production": {
-        "import": "./build/playcanvas/src/index.js",
-        "require": "./build/playcanvas.js"
-      },
       "default": {
         "import": "./build/playcanvas/src/index.js",
         "require": "./build/playcanvas.js"
       }
-    },
-    "./debug": {
-      "types": "./build/playcanvas.d.ts",
-      "import": "./build/playcanvas.dbg/src/index.js",
-      "require": "./build/playcanvas.dbg.js"
-    },
-    "./profiler": {
-      "types": "./build/playcanvas.d.ts",
-      "import": "./build/playcanvas.prf/src/index.js",
-      "require": "./build/playcanvas.prf.js"
     },
     "./build/*": "./build/*",
     "./scripts/*": "./scripts/*"
@@ -75,8 +53,12 @@
     "url": "https://github.com/playcanvas/engine.git"
   },
   "files": [
-    "build/playcanvas*",
-    "build/playcanvas*/*",
+    "build/playcanvas",
+    "build/playcanvas.d.ts",
+    "build/playcanvas.js",
+    "build/playcanvas.min.js",
+    "build/playcanvas.min.mjs",
+    "build/playcanvas.mjs",
     "scripts",
     "README*.md"
   ],
