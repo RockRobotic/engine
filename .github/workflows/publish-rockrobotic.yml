@@ -1,0 +1,45 @@
+name: Publish to GitHub Packages (fork)
+
+# Builds the fork and publishes it to GitHub Packages so consumers can install
+# a pre-built tarball instead of cloning + building the engine at install time.
+#
+# Triggers: tag push matching v*-rock.N, or manual run via workflow_dispatch.
+# The upstream playcanvas/engine publish.yml is guarded off (repository_owner
+# check) so it won't run here.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+-rock.[0-9]+"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish @rockrobotic/playcanvas
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'RockRobotic' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.x
+          cache: npm
+          registry-url: https://npm.pkg.github.com
+          scope: '@rockrobotic'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish to GitHub Packages
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
