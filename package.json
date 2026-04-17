@@ -24,6 +24,9 @@
     "webxr"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "main": "build/playcanvas.js",
   "module": "build/playcanvas/src/index.js",
   "types": "build/playcanvas.d.ts",
@@ -115,7 +118,6 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "prepare": "node build.mjs",
     "build:release": "npm run build target:release",
     "build:debug": "npm run build target:debug",
     "build:profiler": "npm run build target:profiler",
