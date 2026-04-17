@@ -35,6 +35,21 @@ class GSplatOctreeResource {
         this.octree?.destroy();
         this.octree = null;
     }
+
+    /**
+     * @type {"flat" | "tree"}
+     */
+    get hierarchyMode() {
+        return this.octree?.hierarchyMode ?? 'flat';
+    }
+
+    /**
+     * Scene-level metadata (LCC2 virtualLoD, lodSplats, etc.). `null` when absent.
+     * @type {Object|null}
+     */
+    get metadata() {
+        return this.octree?.metadata ?? null;
+    }
 }
 
 export { GSplatOctreeResource };

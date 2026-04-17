@@ -99,7 +99,8 @@ const inflate = async (compressed) => {
 };
 
 const downloadArrayBuffer = async (url, asset) => {
-    const response = await (asset.file?.contents ?? fetch(url.load));
+    // credentials: 'include' lets CloudFront signed cookies authorize cross-origin fetches.
+    const response = await (asset.file?.contents ?? fetch(url.load, { credentials: 'include' }));
     if (!response) {
         throw new Error('Error loading resource');
     }

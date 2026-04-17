@@ -1,0 +1,56 @@
+{
+  "version": "0.0.3",
+  "name": "tiny",
+  "epsg": 0,
+  "offset": [0, 0, 0],
+  "shift": [0, 0, 0],
+  "scale": [1, 1, 1],
+  "fileType": "portable",
+  "totalSplats": 300,
+  "lodSplats": [300, 100],
+  "totalLevels": 2,
+  "virtualLoD": null,
+  "splatType": ".sog",
+  "env": null,
+  "splatExtraAttributes": null,
+  "root": {
+    "id": "0",
+    "boundingBox": {
+      "min": [0, 0, 0],
+      "max": [10, 10, 10]
+    },
+    "childNum": 2,
+    "splatFiles": ["data/3dgs/depth1a.sog", "data/3dgs/depth1b.sog", "data/3dgs/leaf.sog"],
+    "meshFiles": [],
+    "bvhFiles": [],
+    "data": {},
+    "child": {
+      "0": {
+        "id": "0_0",
+        "boundingBox": { "min": [0, 0, 0], "max": [5, 10, 10] },
+        "childNum": 1,
+        "data": { "3dgs": { "name": 0, "start": 0, "count": 50 } },
+        "child": {
+          "0": {
+            "id": "0_0_0",
+            "boundingBox": { "min": [0, 0, 0], "max": [5, 5, 10] },
+            "childNum": 0,
+            "data": { "3dgs": { "name": 2, "start": 0, "count": 200 } }
+          }
+        }
+      },
+      "1": {
+        "id": "0_1",
+        "boundingBox": { "min": [5, 0, 0], "max": [10, 10, 10] },
+        "childNum": 0,
+        "data": { "3dgs": { "name": 1, "start": 0, "count": 50 } }
+      }
+    }
+  },
+  "renderingHints": {
+    "renderMethod": "splatting",
+    "renderMethodVariant": "ewa",
+    "sortingMethod": "depth",
+    "cameraModel": "pinhole"
+  }
+}

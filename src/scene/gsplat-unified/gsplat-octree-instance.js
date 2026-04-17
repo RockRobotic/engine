@@ -373,6 +373,10 @@ class GSplatOctreeInstance {
      * @returns {number} Desired LOD index to display.
      */
     selectDesiredLodIndex(node, optimalLodIndex, maxLod, lodUnderfillLimit) {
+        // Hidden nodes (tree-mode: optimalLodIndex = -1 means the selector
+        // descended past this node) have no LoD to select. Return the sentinel
+        // so applyLodChanges treats the node as invisible.
+        if (optimalLodIndex < 0) return optimalLodIndex;
         if (lodUnderfillLimit > 0) {
             const allowedMaxCoarseLod = Math.min(maxLod, optimalLodIndex + lodUnderfillLimit);
 
@@ -499,6 +503,17 @@ class GSplatOctreeInstance {
         const worldCameraForward = cameraNode.forward;
         const localCameraForward = _invWorldMat.transformVector(worldCameraForward, _localCameraFwd).normalize();
 
+        // Tree mode (LCC2): use hierarchical selection instead of per-leaf LoD pyramids.
+        if (this.octree.hierarchyMode === 'tree') {
+            return this._evaluateTreeNodeLods(
+                localCameraPosition,
+                fovScale,
+                lodBaseDistance,
+                lodMultiplier,
+                uniformScale
+            );
+        }
+
         const nodes = this.octree.nodes;
         const nodeInfos = this.nodeInfos;
         let totalSplats = 0;
@@ -553,6 +568,47 @@ class GSplatOctreeInstance {
             }
         }
 
+        return totalSplats;
+    }
+
+    /**
+     * Tree-mode companion to evaluateNodeLods. Selects active nodes via tree walk,
+     * populates nodeInfos with optimalLod = 0 (visible) or -1 (hidden).
+     *
+     * @param {Vec3} localCameraPosition - Camera position in octree local space.
+     * @param {number} fovScale - FOV compensation multiplier.
+     * @param {number} lodBaseDistance - Base distance for first LoD transition.
+     * @param {number} lodMultiplier - Geometric ratio between LoD thresholds.
+     * @param {number} uniformScale - Uniform scale of the octree transform.
+     * @returns {number} Total splat count across active nodes.
+     * @private
+     */
+    _evaluateTreeNodeLods(localCameraPosition, fovScale, lodBaseDistance, lodMultiplier, uniformScale) {
+        const nodes = this.octree.nodes;
+        const nodeInfos = this.nodeInfos;
+
+        for (let i = 0; i < nodeInfos.length; i++) {
+            nodeInfos[i].optimalLod = -1;
+        }
+
+        // Hysteresis (deadband on depth transitions) is intentionally off — a stale value
+        // from the previous frame would fight budget-driven coarsening and stall convergence.
+        // Camera-motion flicker can be re-introduced later as budget-aware conditional hysteresis.
+        const active = selectTreeActiveNodes(this.octree, {
+            cameraPos: { x: localCameraPosition.x, y: localCameraPosition.y, z: localCameraPosition.z },
+            lodBaseDistance,
+            lodMultiplier,
+            fovScale
+        });
+
+        let totalSplats = 0;
+        for (const idx of active) {
+            nodeInfos[idx].optimalLod = 0;
+            nodes[idx].bounds.closestPoint(localCameraPosition, _dirToNode);
+            _dirToNode.sub(localCameraPosition);
+            nodeInfos[idx].worldDistance = _dirToNode.length() * fovScale * uniformScale;
+            totalSplats += nodes[idx].lods[0].count;
+        }
         return totalSplats;
     }
 
@@ -999,6 +1055,88 @@ class GSplatOctreeInstance {
             _tempCompletedUrls.length = 0;
         }
     }
+}
+
+const _selectorDir = new Vec3();
+const _selectorPos = new Vec3();
+const _selectorClosest = new Vec3();
+
+/**
+ * Tree-mode LoD selection. Walks the LCC2 tree from root and returns the
+ * set of node indices that should be rendered at the given camera position.
+ *
+ * One node is emitted per root-to-leaf path: either a node whose depth matches
+ * the target depth for its distance, or a leaf (if reached before the target
+ * depth). Nodes with `lod === null` (e.g. the LCC2 root) are always descended
+ * through and never emitted.
+ *
+ * Pure function over the octree + camera params. Exported for testing.
+ *
+ * @param {import('./gsplat-octree.js').GSplatOctree} octree - The octree (must be tree mode).
+ * @param {Object} args - Selection args.
+ * @param {{x:number,y:number,z:number}} args.cameraPos - Camera position (local/octree space).
+ * @param {number} args.lodBaseDistance - Base distance for depth 1 (first non-root).
+ * @param {number} args.lodMultiplier - Geometric ratio between successive depths.
+ * @param {number} [args.fovScale=1] - FOV compensation multiplier.
+ * @returns {number[]} Indices into `octree.nodes` that should render.
+ */
+export function selectTreeActiveNodes(octree, args) {
+    const {
+        cameraPos, lodBaseDistance, lodMultiplier,
+        fovScale = 1,
+        previousActive = null,
+        hysteresis = 0
+    } = args;
+    _selectorPos.set(cameraPos.x, cameraPos.y, cameraPos.z);
+
+    const totalLevels = octree.totalLevels;
+    const invLogMult = 1.0 / Math.log(lodMultiplier);
+
+    const active = [];
+
+    const recurse = (nodeIndex) => {
+        const node = octree.nodes[nodeIndex];
+
+        node.bounds.closestPoint(_selectorPos, _selectorClosest);
+        _selectorDir.sub2(_selectorClosest, _selectorPos);
+        const dist = _selectorDir.length();
+        const fovAdjusted = dist * fovScale;
+
+        let targetDepth;
+        if (fovAdjusted < lodBaseDistance) {
+            targetDepth = totalLevels;
+        } else {
+            const coarseSteps = Math.log(fovAdjusted / lodBaseDistance) * invLogMult;
+            targetDepth = Math.max(1, totalLevels - (coarseSteps | 0));
+        }
+
+        // Apply hysteresis: if this node was active last frame, defer coarsening
+        // until distance grows past (1 + hysteresis)x the threshold.
+        if (previousActive && previousActive.has(nodeIndex) && hysteresis > 0) {
+            const deadbandAdjusted = fovAdjusted / (1 + hysteresis);
+            let adjustedTarget;
+            if (deadbandAdjusted < lodBaseDistance) {
+                adjustedTarget = totalLevels;
+            } else {
+                const steps = Math.log(deadbandAdjusted / lodBaseDistance) * invLogMult;
+                adjustedTarget = Math.max(1, totalLevels - (steps | 0));
+            }
+            if (adjustedTarget > targetDepth) targetDepth = adjustedTarget;
+        }
+
+        const isLeaf = node.children.length === 0;
+        const depthOk = node.depth >= targetDepth;
+        const hasLod = node.lods[0].fileIndex >= 0;
+
+        if (isLeaf || depthOk) {
+            if (hasLod) active.push(nodeIndex);
+            return;
+        }
+        for (const childIdx of node.children) recurse(childIdx);
+    };
+
+    if (octree.rootIndex >= 0) recurse(octree.rootIndex);
+    return active;
 }
 
 export { GSplatOctreeInstance };

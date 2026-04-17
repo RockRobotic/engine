@@ -1,6 +1,6 @@
 {
-  "name": "playcanvas",
-  "version": "2.17.2",
+  "name": "@rockrobotic/playcanvas",
+  "version": "2.17.2-rock.0",
   "author": "PlayCanvas <support@playcanvas.com>",
   "homepage": "https://playcanvas.com",
   "description": "PlayCanvas WebGL game engine",
@@ -115,6 +115,7 @@
   },
   "scripts": {
     "build": "node build.mjs",
+    "prepare": "node build.mjs",
     "build:release": "npm run build target:release",
     "build:debug": "npm run build target:debug",
     "build:profiler": "npm run build target:profiler",

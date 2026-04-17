@@ -590,8 +590,9 @@ class PlyParser {
      */
     async load(url, callback, asset) {
         try {
-            // either use the fetch request passed in by the application or initiate it ourselves
-            const response = await (asset.file?.contents ?? fetch(url.load));
+            // either use the fetch request passed in by the application or initiate it ourselves.
+            // credentials: 'include' lets CloudFront signed cookies authorize cross-origin fetches.
+            const response = await (asset.file?.contents ?? fetch(url.load, { credentials: 'include' }));
             if (!response || !response.body) {
                 callback('Error loading resource', null);
             } else {
