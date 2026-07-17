@@ -1,6 +1,8 @@
-import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { test } from 'node:test';
+
 import { GSplatOctree } from '../../../src/scene/gsplat-unified/gsplat-octree.js';
+import { GSplatOctreeResource } from '../../../src/scene/gsplat-unified/gsplat-octree.resource.js';
 
 test('GSplatOctree tree mode: retains every node and links parent/children', () => {
     const data = {
@@ -78,8 +80,6 @@ test('GSplatOctree flat mode: unchanged behaviour when hierarchyMode absent', ()
     assert.equal(oct.nodes[0].lods.length, 2);
 });
 
-import { GSplatOctreeResource } from '../../../src/scene/gsplat-unified/gsplat-octree.resource.js';
-
 test('GSplatOctreeResource: exposes hierarchyMode and metadata from tree data', () => {
     const data = {
         hierarchyMode: 'tree',
@@ -94,7 +94,12 @@ test('GSplatOctreeResource: exposes hierarchyMode and metadata from tree data', 
             children: []
         }
     };
-    const fakeAssetLoader = { load() {}, unload() {}, getResource() { return null; }, destroy() {} };
+    const fakeAssetLoader = { load() {},
+        unload() {},
+        getResource() {
+            return null;
+        },
+        destroy() {} };
     const res = new GSplatOctreeResource('file:///scene.lcc2', data, fakeAssetLoader);
     assert.equal(res.hierarchyMode, 'tree');
     assert.deepEqual(res.metadata, { virtualLoD: null, lodSplats: [100, 50] });

@@ -1,4 +1,5 @@
 import { Color } from '../core/math/color.js';
+import { Debug } from '../core/debug.js';
 import { Mat4 } from '../core/math/mat4.js';
 import { Vec3 } from '../core/math/vec3.js';
 import { Vec4 } from '../core/math/vec4.js';
@@ -8,13 +9,16 @@ import {
     ASPECT_AUTO, PROJECTION_PERSPECTIVE, PROJECTION_ORTHOGRAPHIC,
     LAYERID_WORLD, LAYERID_DEPTH, LAYERID_SKYBOX, LAYERID_UI, LAYERID_IMMEDIATE
 } from './constants.js';
-import { RenderPassColorGrab } from './graphics/render-pass-color-grab.js';
-import { RenderPassDepthGrab } from './graphics/render-pass-depth-grab.js';
+import { FramePassColorGrab } from './graphics/frame-pass-color-grab.js';
+import { FramePassDepthGrab } from './graphics/frame-pass-depth-grab.js';
 import { CameraShaderParams } from './camera-shader-params.js';
 
 /**
- * @import { RenderPass } from '../platform/graphics/render-pass.js'
+ * @import { FramePass } from '../platform/graphics/frame-pass.js'
+ * @import { GraphicsDevice } from '../platform/graphics/graphics-device.js'
+ * @import { RenderTarget } from '../platform/graphics/render-target.js'
  * @import { FogParams } from './fog-params.js'
+ * @import { RenderView } from './render-view.js'
  * @import { ShaderPassInfo } from './shader-pass.js'
  */
 
@@ -23,6 +27,8 @@ const _deviceCoord = new Vec3();
 const _halfSize = new Vec3();
 const _point = new Vec3();
 const _invViewProjMat = new Mat4();
+const _xrViewProjMat = new Mat4();
+const _xrViewFrustum = new Frustum();
 const _frustumPoints = [new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3()];
 
 /**
@@ -31,18 +37,61 @@ const _frustumPoints = [new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3
  * @ignore
  */
 class Camera {
+    /** @private */
+    static _flipYProjectionMatrix = new Mat4().setScale(1, -1, 1);
+
+    /** @private */
+    static _webGpuDepthRangeMatrix = new Mat4().set([
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 0.5, 0,
+        0, 0, 0.5, 1
+    ]);
+
+    /** @private */
+    static _applyShaderProjectionScratch = new Mat4();
+
+    /**
+     * Builds the projection matrix matching shader `matrix_projection` after optional flip-Y
+     * for render targets and optional WebGPU clip-depth range adjustment.
+     *
+     * @param {Mat4} projection - Source projection ({@link Camera#projectionMatrix}).
+     * @param {Mat4} out - Receives the transformed matrix.
+     * @param {boolean} flipY - When true, apply render-target Y flip first.
+     * @param {boolean} applyWebGpuDepthRange - When true, map clip Z from -1..1 to 0..1.
+     * @returns {Mat4} out
+     */
+    static applyShaderProjectionTransform(projection, out, flipY, applyWebGpuDepthRange) {
+        if (!flipY && !applyWebGpuDepthRange) {
+            out.copy(projection);
+            return out;
+        }
+        if (flipY && applyWebGpuDepthRange) {
+            const scratch = Camera._applyShaderProjectionScratch;
+            scratch.mul2(Camera._flipYProjectionMatrix, projection);
+            out.mul2(Camera._webGpuDepthRangeMatrix, scratch);
+            return out;
+        }
+        if (flipY) {
+            out.mul2(Camera._flipYProjectionMatrix, projection);
+            return out;
+        }
+        out.mul2(Camera._webGpuDepthRangeMatrix, projection);
+        return out;
+    }
+
     /**
      * @type {ShaderPassInfo|null}
      */
     shaderPassInfo = null;
 
     /**
-     * @type {RenderPassColorGrab|null}
+     * @type {FramePassColorGrab|null}
      */
     renderPassColorGrab = null;
 
     /**
-     * @type {RenderPass|null}
+     * @type {FramePassDepthGrab|null}
      */
     renderPassDepthGrab = null;
 
@@ -61,17 +110,40 @@ class Camera {
     shaderParams = new CameraShaderParams();
 
     /**
-     * Render passes used to render this camera. If empty, the camera will render using the default
-     * render passes.
+     * Frame passes used to render this camera. If empty, the camera will render using the default
+     * frame passes.
      *
-     * @type {RenderPass[]}
+     * @type {FramePass[]}
      */
-    renderPasses = [];
+    framePasses = [];
+
+    /**
+     * Frame passes that execute before this camera's main scene rendering. Entries are picked up
+     * by the RenderPassForward that renders this camera's layers.
+     *
+     * @type {FramePass[]}
+     */
+    beforePasses = [];
 
     /** @type {number} */
     jitter = 0;
 
-    constructor() {
+    /**
+     * The graphics device used by this camera. Required so the camera can compute its aspect
+     * ratio from the backbuffer size when no render target is assigned.
+     *
+     * @type {GraphicsDevice}
+     */
+    device;
+
+    /**
+     * @param {GraphicsDevice} graphicsDevice - The graphics device this camera will use for
+     * automatic aspect ratio calculation against the backbuffer size.
+     */
+    constructor(graphicsDevice) {
+        Debug.assert(graphicsDevice, 'Camera constructor requires a GraphicsDevice.');
+        this.device = graphicsDevice;
+
         this._aspectRatio = 16 / 9;
         this._aspectRatioMode = ASPECT_AUTO;
         this._calculateProjection = null;
@@ -119,8 +191,12 @@ class Camera {
 
         this.frustum = new Frustum();
 
-        // Set by XrManager
-        this._xr = null;
+        // Set by XrManager when an XR session takes over this camera: a reference to the manager's
+        // live per-view array (matrices, viewports, updated each frame), or null when not in XR.
+        // `xrActive` is derived from it. This replaces the previous back-pointer to the XrManager,
+        // keeping the scene layer decoupled from the framework XR module.
+        /** @type {RenderView[]|null} */
+        this._xrViews = null;
         this._xrProperties = {
             horizontalFov: this._horizontalFov,
             fov: this._fov,
@@ -138,7 +214,7 @@ class Camera {
         this.renderPassDepthGrab?.destroy();
         this.renderPassDepthGrab = null;
 
-        this.renderPasses.length = 0;
+        this.framePasses.length = 0;
     }
 
     /**
@@ -176,7 +252,18 @@ class Camera {
     }
 
     get aspectRatio() {
-        return (this.xr?.active) ? this._xrProperties.aspectRatio : this._aspectRatio;
+        if (this.xrActive) return this._xrProperties.aspectRatio;
+
+        // in ASPECT_AUTO mode, always recompute from current inputs (render target / backbuffer
+        // size and rect). The computation is trivially cheap, and this avoids a few complexities.
+        if (this._aspectRatioMode === ASPECT_AUTO) {
+            const newValue = this.calculateAspectRatio();
+            if (this._aspectRatio !== newValue) {
+                this._aspectRatio = newValue;
+                this._projMatDirty = true;
+            }
+        }
+        return this._aspectRatio;
     }
 
     set aspectRatioMode(newValue) {
@@ -271,7 +358,7 @@ class Camera {
     }
 
     get farClip() {
-        return (this.xr?.active) ? this._xrProperties.farClip : this._farClip;
+        return (this.xrActive) ? this._xrProperties.farClip : this._farClip;
     }
 
     set flipFaces(newValue) {
@@ -290,7 +377,7 @@ class Camera {
     }
 
     get fov() {
-        return (this.xr?.active) ? this._xrProperties.fov : this._fov;
+        return (this.xrActive) ? this._xrProperties.fov : this._fov;
     }
 
     set frustumCulling(newValue) {
@@ -309,7 +396,7 @@ class Camera {
     }
 
     get horizontalFov() {
-        return (this.xr?.active) ? this._xrProperties.horizontalFov : this._horizontalFov;
+        return (this.xrActive) ? this._xrProperties.horizontalFov : this._horizontalFov;
     }
 
     set layers(newValue) {
@@ -317,6 +404,12 @@ class Camera {
         this._layersSet = new Set(this._layers);
     }
 
+    /**
+     * Gets the layer IDs this camera renders. Use the setter to replace the array; do not mutate
+     * the returned array.
+     *
+     * @type {ReadonlyArray<number>}
+     */
     get layers() {
         return this._layers;
     }
@@ -333,7 +426,7 @@ class Camera {
     }
 
     get nearClip() {
-        return (this.xr?.active) ? this._xrProperties.nearClip : this._nearClip;
+        return (this.xrActive) ? this._xrProperties.nearClip : this._nearClip;
     }
 
     set node(newValue) {
@@ -373,6 +466,7 @@ class Camera {
 
     set rect(newValue) {
         this._rect.copy(newValue);
+        this._projMatDirty = true;
     }
 
     get rect() {
@@ -381,6 +475,7 @@ class Camera {
 
     set renderTarget(newValue) {
         this._renderTarget = newValue;
+        this._projMatDirty = true;
     }
 
     get renderTarget() {
@@ -428,15 +523,53 @@ class Camera {
         return this._shutter;
     }
 
-    set xr(newValue) {
-        if (this._xr !== newValue) {
-            this._xr = newValue;
+    /**
+     * Sets the list of {@link RenderView}s this camera renders with (one per XR eye/screen), or
+     * null when not rendering an XR session. Set by the XR manager.
+     *
+     * @param {RenderView[]|null} value - The per-view list, or null when not in XR.
+     */
+    set xrViews(value) {
+        // the projection source switches between XR and non-XR when XR activeness changes, so the
+        // cached projection matrix must be invalidated on that transition
+        if ((value !== null) !== (this._xrViews !== null)) {
             this._projMatDirty = true;
         }
+        this._xrViews = value;
     }
 
-    get xr() {
-        return this._xr;
+    /**
+     * @type {RenderView[]|null}
+     */
+    get xrViews() {
+        return this._xrViews;
+    }
+
+    /**
+     * True while an XR session owns this camera (equivalent to {@link Camera#xrViews} being set).
+     *
+     * @type {boolean}
+     */
+    get xrActive() {
+        return this._xrViews !== null;
+    }
+
+    /**
+     * Calculates the aspect ratio that should be used for the camera, based on the size of the
+     * given render target (or the backbuffer if no render target is given), and the camera's
+     * `rect`. The `rect` is included so that a camera rendering into a sub-region of a render
+     * target gets the aspect ratio of the actual rendered pixel area (important for split-screen
+     * and similar setups, otherwise rendering would appear stretched).
+     *
+     * @param {RenderTarget|null} [rt] - Optional render target. If unspecified, the camera's
+     * own render target (or, if that is also null, the backbuffer) is used.
+     * @returns {number} The computed aspect ratio.
+     */
+    calculateAspectRatio(rt) {
+        const target = rt ?? this._renderTarget;
+        const width = target ? target.width : this.device.width;
+        const height = target ? target.height : this.device.height;
+        return (width * this._rect.z) / (height * this._rect.w);
     }
 
     /**
@@ -445,7 +578,7 @@ class Camera {
      * @returns {Camera} A cloned Camera.
      */
     clone() {
-        return new Camera().copy(this);
+        return new Camera(this.device).copy(this);
     }
 
     /**
@@ -504,7 +637,7 @@ class Camera {
     _enableRenderPassColorGrab(device, enable) {
         if (enable) {
             if (!this.renderPassColorGrab) {
-                this.renderPassColorGrab = new RenderPassColorGrab(device);
+                this.renderPassColorGrab = new FramePassColorGrab(device);
             }
         } else {
             this.renderPassColorGrab?.destroy();
@@ -515,7 +648,7 @@ class Camera {
     _enableRenderPassDepthGrab(device, renderer, enable) {
         if (enable) {
             if (!this.renderPassDepthGrab) {
-                this.renderPassDepthGrab = new RenderPassDepthGrab(device, this);
+                this.renderPassDepthGrab = new FramePassDepthGrab(device, this);
             }
         } else {
             this.renderPassDepthGrab?.destroy();
@@ -528,6 +661,58 @@ class Camera {
             this._viewProjMat.mul2(this.projectionMatrix, this.viewMatrix);
             this._viewProjMatDirty = false;
         }
+    }
+
+    /**
+     * Refreshes the derived per-view matrices of all {@link Camera#xrViews}, using this camera's
+     * parent world transform. The renderer (and the gsplat passes, which run earlier in the frame)
+     * call this before reading the per-view matrices.
+     *
+     * Note: this recomputes on every call. Within a frame the parent transform is stable, so the
+     * 2-3 calls/frame could be collapsed to a single recompute by guarding on
+     * `device.renderVersion` (as {@link Camera#_storeShaderMatrices} does) - left as a future
+     * optimization, as it needs checking against cameras that render multiple times per frame
+     * (e.g. multiple render targets).
+     */
+    updateViewTransforms() {
+        const views = this.xrViews;
+        if (!views) {
+            return;
+        }
+        const parentWorldTransform = this._node?.parent?.getWorldTransform() ?? null;
+        for (let i = 0; i < views.length; i++) {
+            views[i].updateTransforms(parentWorldTransform);
+        }
+    }
+
+    /**
+     * Updates {@link Camera#frustum} to the combined volume of all XR views, to avoid culling
+     * objects visible in any view (e.g. the right edge of the right eye in stereo rendering).
+     * The views are merged conservatively via {@link Frustum#add}, which handles the asymmetric
+     * per-eye projections real headsets report (matching planes of the two eyes have different
+     * normals, so a simple outermost-plane selection would over-cull at a distance).
+     *
+     * @returns {boolean} True when XR views were present and the frustum was updated, false
+     * otherwise (the caller should fall back to the mono frustum path).
+     * @ignore
+     */
+    updateXrFrustum() {
+        const views = this.xrViews;
+        if (!views?.length) {
+            return false;
+        }
+
+        // first view establishes the base frustum
+        _xrViewProjMat.mul2(views[0].projMat, views[0].viewOffMat);
+        this.frustum.setFromMat4(_xrViewProjMat);
+
+        // for additional views, expand the frustum to encompass all views
+        for (let v = 1; v < views.length; v++) {
+            _xrViewProjMat.mul2(views[v].projMat, views[v].viewOffMat);
+            _xrViewFrustum.setFromMat4(_xrViewProjMat);
+            this.frustum.add(_xrViewFrustum);
+        }
+        return true;
     }
 
     /**
@@ -619,15 +804,19 @@ class Camera {
     }
 
     _evaluateProjectionMatrix() {
+        // in ASPECT_AUTO, reading the aspectRatio getter recomputes it from current inputs
+        // and marks _projMatDirty if the value changed (e.g. after a backbuffer resize with
+        // no other input changes)
+        const aspect = this.aspectRatio;
         if (this._projMatDirty) {
             if (this._projection === PROJECTION_PERSPECTIVE) {
-                this._projMat.setPerspective(this.fov, this.aspectRatio, this.nearClip, this.farClip, this.horizontalFov);
+                this._projMat.setPerspective(this.fov, aspect, this.nearClip, this.farClip, this.horizontalFov);
                 this._projMatSkybox.copy(this._projMat);
             } else {
                 const y = this._orthoHeight;
-                const x = y * this.aspectRatio;
+                const x = y * aspect;
                 this._projMat.setOrtho(-x, x, -y, y, this.nearClip, this.farClip);
-                this._projMatSkybox.setPerspective(this.fov, this.aspectRatio, this.nearClip, this.farClip);
+                this._projMatSkybox.setPerspective(this.fov, aspect, this.nearClip, this.farClip);
             }
 
             this._projMatDirty = false;

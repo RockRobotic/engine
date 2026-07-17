@@ -1,10 +1,17 @@
-// @config DESCRIPTION Demonstrates LOD streaming combined with spherical harmonics for view-dependent effects.
-import { data } from 'examples/observer';
-import { deviceType, rootPath, fileImport } from 'examples/utils';
-import * as pc from 'playcanvas';
+// @config
+//
+// Demonstrates LOD streaming combined with spherical harmonics for view-dependent effects.
+//
+// @credit
+// title: Skatepark
+// author: Christoph Schindelar
+// source: https://superspl.at/user?id=schindelar3d
 
-const { CameraControls } = await fileImport(`${rootPath}/static/scripts/esm/camera-controls.mjs`);
-const { GsplatRevealGridEruption } = await fileImport(`${rootPath}/static/scripts/esm/gsplat/reveal-grid-eruption.mjs`);
+import * as pc from 'playcanvas';
+import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs';
+import { GsplatRevealGridEruption } from 'playcanvas/scripts/esm/gsplat/reveal-grid-eruption.mjs';
+
+import { data, deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -41,7 +48,13 @@ app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
 app.setCanvasResolution(pc.RESOLUTION_AUTO);
 
 // Ensure canvas is updated when window changes size
-const onResize = () => app.resizeCanvas();
+const onResize = () => {
+    app.resizeCanvas();
+    // With on-demand rendering (autoRender is set to false once the reveal completes), a resize is
+    // a viewport change the app makes itself — it does not raise 'frame:request' — so request a
+    // render to draw the scene at the new canvas size.
+    app.renderNextFrame = true;
+};
 window.addEventListener('resize', onResize);
 app.on('destroy', () => {
     window.removeEventListener('resize', onResize);
@@ -89,7 +102,7 @@ const assets = {
     envatlas: new pc.Asset(
         'env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/table-mountain-env-atlas.png` },
+        { url: './assets/cubemaps/table-mountain-env-atlas.png' },
         { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
     )
 };
@@ -110,32 +123,29 @@ assetListLoader.load(() => {
     app.scene.gsplat.lodUnderfillLimit = config.lodUnderfillLimit;
 
     // set up SH update parameters
-    app.scene.gsplat.colorUpdateDistance = 1;
-    app.scene.gsplat.colorUpdateAngle = 4;
-    app.scene.gsplat.colorUpdateDistanceLodScale = 2;
-    app.scene.gsplat.colorUpdateAngleLodScale = 2;
+    app.scene.gsplat.colorUpdateAngle = 10;
+
+    data.on('renderer:set', () => {
+        app.scene.gsplat.renderer = data.get('renderer');
+        const current = app.scene.gsplat.currentRenderer;
+        if (current !== data.get('renderer')) {
+            setTimeout(() => data.set('renderer', current), 0);
+        }
+    });
 
     // initialize UI settings
-    data.set('debugLod', false);
-    data.set('colorizeSH', false);
+    data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
+    data.set('debug', pc.GSPLAT_DEBUG_NONE);
     data.set('lodPreset', pc.platform.mobile ? 'mobile' : 'desktop');
     data.set('splatBudget', pc.platform.mobile ? 1 : 3);
 
-    app.scene.gsplat.colorizeLod = !!data.get('debugLod');
-    app.scene.gsplat.colorizeColorUpdate = !!data.get('colorizeSH');
-
-    data.on('debugLod:set', () => {
-        app.scene.gsplat.colorizeLod = !!data.get('debugLod');
-    });
-
-    data.on('colorizeSH:set', () => {
-        app.scene.gsplat.colorizeColorUpdate = !!data.get('colorizeSH');
+    data.on('debug:set', () => {
+        app.scene.gsplat.debug = data.get('debug');
     });
 
     const entity = new pc.Entity(config.name || 'gsplat');
     entity.addComponent('gsplat', {
-        asset: assets.church,
-        unified: true
+        asset: assets.church
     });
     entity.setLocalPosition(0, 0, 0);
     const [rotX, rotY, rotZ] = /** @type {[number, number, number]} */ (config.eulerAngles || [-90, 0, 0]);
@@ -147,8 +157,8 @@ assetListLoader.load(() => {
     const applyPreset = () => {
         const preset = data.get('lodPreset');
         const presetData = LOD_PRESETS[preset] || LOD_PRESETS.desktop;
-        app.scene.gsplat.lodRangeMin = presetData.range[0];
-        app.scene.gsplat.lodRangeMax = presetData.range[1];
+        gs.lodRangeMin = presetData.range[0];
+        gs.lodRangeMax = presetData.range[1];
         gs.lodBaseDistance = presetData.lodBaseDistance;
         data.set('lodBaseDistance', presetData.lodBaseDistance);
     };
@@ -215,10 +225,51 @@ assetListLoader.load(() => {
         focusPoint: focusPoint
     });
 
-    // update HUD stats every frame
+    // --- On-demand rendering demo -----------------------------------------------------------
+    // Gaussian-splat streaming (LOD evaluation + file loading) runs every frame regardless of
+    // rendering. We render continuously while the reveal animation plays, then switch to rendering
+    // only on demand: when streaming has new data to show (the 'frame:request' event) or when the
+    // camera moves. This lets an otherwise-idle app keep loading splats in the background while
+    // staying GPU-idle until there's something new to draw.
+
+    // render whenever streaming produced new data (or a CPU sort result became ready to apply)
+    app.systems.gsplat.on('frame:request', () => {
+        app.renderNextFrame = true;
+    });
+
+    let revealPlaying = true;
+    const lastCamPos = new pc.Vec3();
+    const lastCamRot = new pc.Quat();
+
     app.on('update', () => {
+        // update HUD stats
         data.set('data.stats.gsplats', app.stats.frame.gsplats.toLocaleString());
+
+        if (revealPlaying) {
+            // the reveal script disables itself when its animation completes; once that happens,
+            // stop rendering every frame and switch to on-demand rendering.
+            if (revealScript && !revealScript.enabled) {
+                revealPlaying = false;
+                app.autoRender = false;
+
+                // The reveal finishing is a draw-state change (it ends the per-frame splat masking),
+                // not a streaming change, so it does not raise 'frame:request'. Render one final
+                // frame so the fully-revealed scene — including the far environment/sky splats, which
+                // the eruption reveals last — is shown before we go idle.
+                app.renderNextFrame = true;
+
+                lastCamPos.copy(camera.getPosition());
+                lastCamRot.copy(camera.getRotation());
+            }
+        } else {
+            // keep the fly camera interactive: render when it has moved or rotated this frame
+            const pos = camera.getPosition();
+            const rot = camera.getRotation();
+            if (!pos.equals(lastCamPos) || !rot.equals(lastCamRot)) {
+                app.renderNextFrame = true;
+                lastCamPos.copy(pos);
+                lastCamRot.copy(rot);
+            }
+        }
     });
 });
-
-export { app };

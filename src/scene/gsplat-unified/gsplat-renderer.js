@@ -1,65 +1,85 @@
-import { SEMANTIC_POSITION, SEMANTIC_ATTR13, CULLFACE_NONE, PIXELFORMAT_RGBA16U } from '../../platform/graphics/constants.js';
-import {
-    BLEND_NONE, BLEND_PREMULTIPLIED, BLEND_ADDITIVE, GSPLAT_FORWARD, GSPLAT_SHADOW,
-    SHADOWCAMERA_NAME
-} from '../constants.js';
-import { ShaderMaterial } from '../materials/shader-material.js';
-import { GSplatResourceBase } from '../gsplat/gsplat-resource-base.js';
-import { MeshInstance } from '../mesh-instance.js';
-import { math } from '../../core/math/math.js';
+import { Debug } from '../../core/debug.js';
+import { FisheyeProjection } from '../graphics/fisheye-projection.js';
 
 /**
- * @import { VertexBuffer } from '../../platform/graphics/vertex-buffer.js'
  * @import { StorageBuffer } from '../../platform/graphics/storage-buffer.js'
+ * @import { ShaderMaterial } from '../materials/shader-material.js'
  * @import { Layer } from '../layer.js'
  * @import { GraphNode } from '../graph-node.js'
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { GSplatWorkBuffer } from './gsplat-work-buffer.js'
+ * @import { GSplatWorld } from './gsplat-world.js'
+ * @import { GSplatWorldState } from './gsplat-world-state.js'
+ * @import { GSplatVaryings } from './gsplat-varyings.js'
+ * @import { MeshInstance } from '../mesh-instance.js'
+ * @import { FogParams } from '../fog-params.js'
  */
 
 /**
- * Class that renders the splats from the work buffer.
+ * Per-call parameters for a renderer view (forward or pick), populated by the manager each frame
+ * from the scene gsplat settings plus the view camera (and pick viewport). Reused per call to avoid
+ * per-frame allocation; the renderer must not retain a reference to it.
+ *
+ * @typedef {object} GSplatRenderViewParams
+ * @ignore
+ * @property {GraphNode} cameraNode - The camera node for this view.
+ * @property {boolean} radialSorting - Whether radial (vs linear) depth sorting is used.
+ * @property {number} alphaClip - Alpha threshold for shadow/pick/prepass rendering.
+ * @property {number} alphaClipForward - Alpha floor for the forward pass.
+ * @property {number} minPixelSize - Minimum projected splat size.
+ * @property {number} minContribution - Minimum visual contribution threshold.
+ * @property {number} foveationStrength - Foveation strength.
+ * @property {number} foveationCenter - Foveation center.
+ * @property {boolean} antiAlias - Whether antialiasing is enabled.
+ * @property {number} fisheye - Fisheye projection strength.
+ * @property {ShaderMaterial} material - The scene gsplat template material.
+ * @property {GSplatVaryings} varyings - User varying streams (provides the cache `words` count).
+ * @property {number} [width] - Pick viewport width in pixels (picking only).
+ * @property {number} [height] - Pick viewport height in pixels (picking only).
+ */
+
+/**
+ * Base class for splat renderers. Holds common state shared by all renderer
+ * implementations (instanced-quad, hybrid GPU-sort, etc.). Derived classes
+ * implement the actual rendering strategy.
  *
  * @ignore
  */
 class GSplatRenderer {
-    /** @type {ShaderMaterial} */
-    _material;
+    /** @type {GraphicsDevice} */
+    device;
 
-    /** @type {MeshInstance} */
-    meshInstance;
-
-    /** @type {VertexBuffer|null} */
-    instanceIndices = null;
-
-    /** @type {number} */
-    instanceIndicesCount = 0;
-
-    /** @type {Layer} */
-    layer;
+    /** @type {GraphNode} */
+    node;
 
     /** @type {GraphNode} */
     cameraNode;
 
-    /** @type {number} */
-    originalBlendType = BLEND_ADDITIVE;
+    /** @type {Layer} */
+    layer;
+
+    /** @type {GSplatWorkBuffer} */
+    workBuffer;
 
     /** @type {number|undefined} */
     renderMode;
 
-    /** @type {Set<string>} */
-    _internalDefines = new Set();
-
-    /** @type {boolean} */
-    forceCopyMaterial = true;
-
     /**
      * Cached work buffer format version for detecting extra stream changes.
      *
-     * @type {number}
-     * @private
+     * @protected
      */
     _workBufferFormatVersion = -1;
+
+    /**
+     * Fisheye projection helper shared by all renderer paths.
+     * The manager calls update() during culling; renderers read the computed values
+     * when binding uniforms.
+     *
+     * @type {FisheyeProjection}
+     * @ignore
+     */
+    fisheyeProj = new FisheyeProjection();
 
     /**
      * @param {GraphicsDevice} device - The graphics device.
@@ -74,404 +94,182 @@ class GSplatRenderer {
         this.cameraNode = cameraNode;
         this.layer = layer;
         this.workBuffer = workBuffer;
-        this._workBufferFormatVersion = workBuffer.format.extraStreamsVersion;
+        this._workBufferFormatVersion = workBuffer?.format.extraStreamsVersion ?? -1;
+    }
 
-        // construct the material which renders the splats from the work buffer
-        this._material = new ShaderMaterial({
-            uniqueName: 'UnifiedSplatMaterial',
-            vertexGLSL: '#include "gsplatVS"',
-            fragmentGLSL: '#include "gsplatPS"',
-            vertexWGSL: '#include "gsplatVS"',
-            fragmentWGSL: '#include "gsplatPS"',
-            attributes: {
-                vertex_position: SEMANTIC_POSITION,
-                vertex_id_attrib: SEMANTIC_ATTR13
-            }
-        });
-
-        this.configureMaterial();
-
-        // Capture internal define names to protect them from being cleared
-        this._material.defines.forEach((value, key) => {
-            this._internalDefines.add(key);
-        });
-
-        // Also protect defines that may be added dynamically
-        this._internalDefines.add('GSPLAT_UNIFIED_ID');
-        this._internalDefines.add('PICK_CUSTOM_ID');
-        this._internalDefines.add('GSPLAT_INDIRECT_DRAW');
-
-        this.meshInstance = this.createMeshInstance();
+    destroy() {
     }
 
     /**
-     * Sets the render mode for this renderer, managing layer array membership.
+     * Resolves the effective fisheye strength for this renderer's camera. Fisheye is not supported
+     * in XR by any renderer (it overrides the per-eye perspective projection), so it is forced off
+     * while an XR session is active. Warns once when a non-zero value is suppressed.
+     *
+     * @param {number} fisheye - Requested fisheye strength (typically `scene.gsplat.fisheye`).
+     * @returns {number} The fisheye strength to use (0 while in XR, otherwise `fisheye`).
+     */
+    resolveFisheye(fisheye) {
+        const xrActive = !!this.cameraNode.camera?.camera?.xrActive;
+        if (xrActive && fisheye > 0) {
+            Debug.warnOnce('GSplat: fisheye projection is not supported in XR; disabling it.');
+            return 0;
+        }
+        return fisheye;
+    }
+
+    /**
+     * Sets the render mode for this renderer.
      *
      * @param {number} renderMode - Bitmask flags controlling render passes (GSPLAT_FORWARD, GSPLAT_SHADOW, or both).
      */
     setRenderMode(renderMode) {
-        const oldRenderMode = this.renderMode ?? 0;
-
-        // Calculate what changed
-        const wasForward = (oldRenderMode & GSPLAT_FORWARD) !== 0;
-        const wasShadow = (oldRenderMode & GSPLAT_SHADOW) !== 0;
-        const isForward = (renderMode & GSPLAT_FORWARD) !== 0;
-        const isShadow = (renderMode & GSPLAT_SHADOW) !== 0;
-
-        // Update mesh instance castShadow state FIRST, before adding to arrays
-        this.meshInstance.castShadow = isShadow;
-
-        // Remove from old arrays if needed
-        if (wasForward && !isForward) {
-            this.layer.removeMeshInstances([this.meshInstance], true);
-        }
-        if (wasShadow && !isShadow) {
-            this.layer.removeShadowCasters([this.meshInstance]);
-        }
-
-        // Add to new arrays if needed
-        if (!wasForward && isForward) {
-            this.layer.addMeshInstances([this.meshInstance], true);
-        }
-        if (!wasShadow && isShadow) {
-            this.layer.addShadowCasters([this.meshInstance]);
-        }
-
-        // Update state
         this.renderMode = renderMode;
     }
 
-    destroy() {
-        // Remove mesh instance from appropriate layer arrays based on render mode
-        if (this.renderMode) {
-            if (this.renderMode & GSPLAT_FORWARD) {
-                this.layer.removeMeshInstances([this.meshInstance], true);
-            }
-            if (this.renderMode & GSPLAT_SHADOW) {
-                this.layer.removeShadowCasters([this.meshInstance]);
-            }
-        }
-
-        this._material.destroy();
-        this.meshInstance.destroy();
+    /**
+     * Whether this renderer runs the GPU sort/projection/cull pipeline itself (true) rather than
+     * relying on the manager's CPU worker sorter (false). Drives the manager's per-frame branching.
+     *
+     * @type {boolean}
+     */
+    get usesGpuSort() {
+        return false;
     }
 
+    /**
+     * Whether this renderer needs frustum-culling bounds uploaded to the work buffer (the GPU cull
+     * path allocates them; the CPU path does not).
+     *
+     * @type {boolean}
+     */
+    get requiresBounds() {
+        return false;
+    }
+
+    /**
+     * Whether this renderer relies on the manager-owned CPU worker sorter.
+     *
+     * @type {boolean}
+     */
+    get requiresCpuSort() {
+        return !this.usesGpuSort;
+    }
+
+    /**
+     * Returns the material used by this renderer, or null if not applicable.
+     *
+     * @type {ShaderMaterial|null}
+     */
     get material() {
-        return this._material;
-    }
-
-    configureMaterial() {
-        const { workBuffer } = this;
-
-        // Inject format's shader chunks (uses workBuffer.format)
-        this._injectFormatChunks();
-
-        // Set defines
-        this._material.setDefine('SH_BANDS', '0');
-
-        // Set GSPLAT_COLOR_FLOAT define based on work buffer's color format
-        const colorStream = workBuffer.format.getStream('dataColor');
-        if (colorStream && colorStream.format !== PIXELFORMAT_RGBA16U) {
-            this._material.setDefine('GSPLAT_COLOR_FLOAT', '');
-        }
-
-        // Enable unified ID defines when pcId stream exists
-        this._updateIdDefines();
-
-        // Bind work buffer textures from the texture map
-        this._bindWorkBufferTextures();
-
-        // set instance properties
-        const dither = false;
-        this._material.setParameter('numSplats', 0);
-
-        this.setOrderData();
-
-        this._material.setParameter('alphaClip', 0.3);
-        this._material.setDefine(`DITHER_${dither ? 'BLUENOISE' : 'NONE'}`, '');
-        this._material.cull = CULLFACE_NONE;
-        this._material.blendType = dither ? BLEND_NONE : BLEND_PREMULTIPLIED;
-        this._material.depthWrite = !!dither;
-        this._material.update();
+        return null;
     }
 
     /**
-     * Binds work buffer textures to the material.
+     * Sets the data source providing format and texture access. The base implementation updates
+     * the workBuffer and notifies derived classes of the format change. Derived classes may
+     * override this to react to the source change (e.g. re-pointing materials at the new
+     * work-buffer textures).
      *
-     * @private
-     */
-    _bindWorkBufferTextures() {
-        const { workBuffer } = this;
-
-        for (const stream of workBuffer.format.resourceStreams) {
-            const texture = workBuffer.getTexture(stream.name);
-            if (texture) {
-                this._material.setParameter(stream.name, texture);
-            }
-        }
-    }
-
-    /**
-     * Injects format shader chunks into the material.
-     * Called during initialization and after copying settings from user material.
-     * @private
-     */
-    _injectFormatChunks() {
-        const chunks = this.device.isWebGPU ? this._material.shaderChunks.wgsl : this._material.shaderChunks.glsl;
-        const wbFormat = this.workBuffer.format;
-
-        // Use work buffer format for declarations and read code
-        // getInputDeclarations() returns all streams (base + extra)
-        chunks.set('gsplatDeclarationsVS', wbFormat.getInputDeclarations());
-        chunks.set('gsplatReadVS', wbFormat.getReadCode());
-    }
-
-    update(count, textureSize) {
-
-        // limit splat render count to exclude those behind the camera
-        this.meshInstance.instancingCount = Math.ceil(count / GSplatResourceBase.instanceSize);
-
-        // update splat count on the material
-        this._material.setParameter('numSplats', count);
-        this._material.setParameter('splatTextureSize', textureSize);
-
-        // disable rendering if no splats to render
-        this.meshInstance.visible = count > 0;
-    }
-
-    /**
-     * Updates renderer for indirect draw mode. The instance count and numSplats
-     * are GPU-driven via indirect draw args and a storage buffer.
+     * The source object must provide:
+     * - `format` — a {@link GSplatFormat} describing the texture streams and shader read code.
+     * - `getTexture(name)` — a function returning a {@link Texture} for a given stream name.
      *
+     * @param {object} source - The data source (typically a {@link GSplatWorkBuffer}).
+     */
+    setDataSource(source) {
+        this.workBuffer = source;
+        this.onWorkBufferFormatChanged();
+    }
+
+    /**
+     * Called when the work buffer format has changed. Derived classes reconfigure
+     * their rendering resources (materials, pipelines, bindings, etc.).
+     */
+    onWorkBufferFormatChanged() {
+    }
+
+    /**
+     * Updates the renderer with the current splat count and texture size.
+     *
+     * @param {number} count - The number of visible splats.
      * @param {number} textureSize - The work buffer texture size.
      */
-    updateIndirect(textureSize) {
-        this._material.setParameter('splatTextureSize', textureSize);
-        this.meshInstance.visible = true;
+    update(count, textureSize) {
     }
 
     /**
-     * Configures indirect draw on the mesh instance and binds compaction buffers.
-     * Must be called each frame when compaction is active (slots are per-frame).
+     * Configures the renderer to use GPU-sorted data for rendering.
      *
-     * @param {number} drawSlot - The indirect draw slot index in the device's buffer.
-     * @param {StorageBuffer} compactedSplatIds - Buffer containing sorted visible splat IDs.
-     * @param {StorageBuffer} numSplatsBuffer - Buffer containing numSplats for vertex shader.
+     * @param {number} drawSlot - The indirect draw slot index.
+     * @param {StorageBuffer} sortedIds - Buffer containing sorted visible splat IDs.
+     * @param {StorageBuffer} numSplatsBuffer - Buffer containing the visible splat count.
+     * @param {number} textureSize - The work buffer texture size.
      */
-    setIndirectDraw(drawSlot, compactedSplatIds, numSplatsBuffer) {
-        this.meshInstance.setIndirect(null, drawSlot, 1);
-
-        // Bind compaction buffers for vertex shader
-        this._material.setParameter('compactedSplatIds', compactedSplatIds);
-        this._material.setParameter('numSplatsStorage', numSplatsBuffer);
-
-        // Set GSPLAT_INDIRECT_DRAW define if not already set
-        if (!this._material.getDefine('GSPLAT_INDIRECT_DRAW')) {
-            this._material.setDefine('GSPLAT_INDIRECT_DRAW', true);
-            this._material.update();
-        }
+    setGpuSortedRendering(drawSlot, sortedIds, numSplatsBuffer, textureSize) {
     }
 
     /**
-     * Disables indirect draw, restoring the renderer to direct (CPU-sorted) mode.
+     * Switches the renderer to CPU-sorted rendering mode.
      */
-    disableIndirectDraw() {
-        this.meshInstance.setIndirect(null, -1);
-
-        if (this._material.getDefine('GSPLAT_INDIRECT_DRAW')) {
-            this._material.setDefine('GSPLAT_INDIRECT_DRAW', false);
-            this._material.update();
-        }
-
-        // Restore order data from work buffer (CPU upload path)
-        this.setOrderData();
+    setCpuSortedRendering() {
     }
 
+    /**
+     * Binds the current order data (texture or storage buffer) for CPU-sorted rendering.
+     */
     setOrderData() {
-        // Set the appropriate order data resource based on device type
-        if (this.device.isWebGPU) {
-            this._material.setParameter('splatOrder', this.workBuffer.orderBuffer);
-        } else {
-            this._material.setParameter('splatOrder', this.workBuffer.orderTexture);
-        }
-    }
-
-    frameUpdate(params) {
-
-        // Update colorRampIntensity parameter every frame when overdraw is enabled
-        if (params.colorRamp) {
-            this._material.setParameter('colorRampIntensity', params.colorRampIntensity);
-        }
-
-        // Check if work buffer format has changed (extra streams added)
-        this._syncWithWorkBufferFormat();
-
-        // Copy material settings from params.material if dirty or on first update
-        if (this.forceCopyMaterial || params.material.dirty) {
-            this.copyMaterialSettings(params.material);
-            this.forceCopyMaterial = false;
-        }
     }
 
     /**
-     * Updates the ID-related defines based on whether pcId stream exists.
+     * Per-frame update for the renderer (material syncing, parameter updates).
      *
-     * @private
+     * @param {object} params - The gsplat parameters.
+     * @param {number} [exposure] - Scene exposure value.
+     * @param {FogParams} [fogParams] - Fog parameters.
      */
-    _updateIdDefines() {
-        // GSPLAT_UNIFIED_ID enables reading component ID from work buffer
-        // PICK_CUSTOM_ID prevents pick.js from declaring meshInstanceId uniform
-        const hasPcId = !!this.workBuffer.format.getStream('pcId');
-        this._material.setDefine('GSPLAT_UNIFIED_ID', hasPcId);
-        this._material.setDefine('PICK_CUSTOM_ID', hasPcId);
+    frameUpdate(params, exposure, fogParams) {
     }
 
     /**
-     * Syncs with work buffer format when extra streams are added.
+     * Updates the overdraw visualization mode.
      *
-     * @private
+     * @param {object} params - The gsplat parameters.
      */
-    _syncWithWorkBufferFormat() {
-        const wbFormat = this.workBuffer.format;
-        if (this._workBufferFormatVersion !== wbFormat.extraStreamsVersion) {
-            this._workBufferFormatVersion = wbFormat.extraStreamsVersion;
-
-            // Sync work buffer textures with format
-            this.workBuffer.syncWithFormat();
-
-            // Re-inject format chunks with extra stream declarations
-            this._injectFormatChunks();
-
-            // Bind any new textures from the work buffer
-            this._bindWorkBufferTextures();
-
-            // Enable unified ID defines when pcId stream exists
-            this._updateIdDefines();
-
-            this._material.update();
-        }
-    }
-
-    /**
-     * Copies material settings from a source material to the internal material.
-     * Preserves internal defines while copying user defines, parameters, and shader chunks.
-     *
-     * @param {ShaderMaterial} sourceMaterial - The source material to copy settings from.
-     * @private
-     */
-    copyMaterialSettings(sourceMaterial) {
-        // Clear user defines (preserve internal defines)
-        const keysToDelete = [];
-        this._material.defines.forEach((value, key) => {
-            if (!this._internalDefines.has(key)) {
-                keysToDelete.push(key);
-            }
-        });
-        keysToDelete.forEach(key => this._material.defines.delete(key));
-
-        // Copy defines from source material
-        sourceMaterial.defines.forEach((value, key) => {
-            this._material.defines.set(key, value);
-        });
-
-        // Copy parameters
-        const srcParams = sourceMaterial.parameters;
-        for (const paramName in srcParams) {
-            if (srcParams.hasOwnProperty(paramName)) {
-                this._material.setParameter(paramName, srcParams[paramName].data);
-            }
-        }
-
-        // Copy shader chunks if they exist
-        if (sourceMaterial.hasShaderChunks) {
-            this._material.shaderChunks.copy(sourceMaterial.shaderChunks);
-        }
-
-        // Re-inject format chunks that may have been overwritten by copy
-        this._injectFormatChunks();
-
-        this._material.update();
-    }
-
     updateOverdrawMode(params) {
-        const overdrawEnabled = !!params.colorRamp;
-        const wasOverdrawEnabled = this._material.getDefine('GSPLAT_OVERDRAW');
-
-        if (overdrawEnabled) {
-            this._material.setParameter('colorRamp', params.colorRamp);
-            this._material.setParameter('colorRampIntensity', params.colorRampIntensity);
-        }
-
-        if (overdrawEnabled !== wasOverdrawEnabled) {
-            this._material.setDefine('GSPLAT_OVERDRAW', overdrawEnabled);
-
-            if (overdrawEnabled) {
-                // TODO: when overdraw mode is enabled, we could disable sorting of splats,
-                // as additive blend mode does not require them to be sorted
-
-                // Store the current blend type before switching to additive
-                this.originalBlendType = this._material.blendType;
-                this._material.blendType = BLEND_ADDITIVE;
-            } else {
-                this._material.blendType = this.originalBlendType;
-            }
-
-            this._material.update();
-        }
     }
 
-    setMaxNumSplats(numSplats) {
-
-        // round up to the nearest multiple of instanceSize (same as createInstanceIndices does internally)
-        const roundedNumSplats = math.roundUp(numSplats, GSplatResourceBase.instanceSize);
-
-        if (this.instanceIndicesCount < roundedNumSplats) {
-            this.instanceIndicesCount = roundedNumSplats;
-
-            // destroy old instance indices
-            this.instanceIndices?.destroy();
-
-            // create new instance indices
-            this.instanceIndices = GSplatResourceBase.createInstanceIndices(this.device, numSplats);
-            this.meshInstance.setInstancing(this.instanceIndices, true);
-
-            // update texture size uniform
-            this._material.setParameter('splatTextureSize', this.workBuffer.textureSize);
-        }
+    /**
+     * Invalidates any cached cull/compaction upload state (e.g. after a work-buffer rebuild that
+     * may have moved bounds indices). No-op for renderers without a GPU cull pipeline.
+     */
+    invalidateCullUpload() {
     }
 
-    createMeshInstance() {
+    /**
+     * Prepares the forward view for rendering. Renderers that run their own GPU pipeline (cull +
+     * projection + sort) do their per-frame work here; CPU-sort renderers rely on the manager's
+     * worker instead and leave this as a no-op.
+     *
+     * @param {GSplatWorld} world - The world providing the work buffer, bounds, and states.
+     * @param {GSplatWorldState} worldState - The render-ready world state to draw.
+     * @param {GSplatRenderViewParams} params - Per-call parameters for this view.
+     * @returns {boolean} True if a GPU dispatch ran this call.
+     */
+    prepareRenderView(world, worldState, params) {
+        return false;
+    }
 
-        const mesh = GSplatResourceBase.createMesh(this.device);
-        const textureSize = this.workBuffer.textureSize;
-        const instanceIndices = GSplatResourceBase.createInstanceIndices(this.device, textureSize * textureSize);
-        const meshInstance = new MeshInstance(mesh, this._material);
-        meshInstance.node = this.node;
-        meshInstance.setInstancing(instanceIndices, true);
-
-        // only start rendering the splat after we've received the splat order data
-        meshInstance.instancingCount = 0;
-
-        // custom culling to only disable rendering for matching camera
-        // TODO: consider using aabb as well to avoid rendering off-screen splats
-        const thisCamera = this.cameraNode.camera;
-        meshInstance.isVisibleFunc = (camera) => {
-            const renderMode = this.renderMode ?? 0;
-
-            // visible for main camera in forward rendering mode
-            if (thisCamera.camera === camera && (renderMode & GSPLAT_FORWARD)) {
-                return true;
-            }
-
-            // visible for shadow cameras in shadow rendering mode
-            if (renderMode & GSPLAT_SHADOW) {
-                return camera.node?.name === SHADOWCAMERA_NAME;
-            }
-
-            return false;
-        };
-
-        return meshInstance;
+    /**
+     * Prepares a pick view and returns the configured pick mesh instance. Only meaningful for
+     * renderers with a GPU pipeline; others return null.
+     *
+     * @param {GSplatWorld} world - The world providing the work buffer, bounds, and states.
+     * @param {GSplatWorldState} worldState - The render-ready world state.
+     * @param {GSplatRenderViewParams} pickParams - Per-call parameters for the pick view.
+     * @returns {MeshInstance|null} The pick mesh instance, or null.
+     */
+    preparePickingView(world, worldState, pickParams) {
+        return null;
     }
 }
 

@@ -1,17 +1,11 @@
 import { ComponentSystem } from '../system.js';
 import { ScrollbarComponent } from './component.js';
-import { ScrollbarComponentData } from './data.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
  */
 
-const _schema = [
-    { name: 'enabled', type: 'boolean' },
-    { name: 'orientation', type: 'number' },
-    { name: 'value', type: 'number' },
-    { name: 'handleSize', type: 'number' }
-];
+const _properties = ['orientation', 'value', 'handleSize', 'handleEntity'];
 
 /**
  * Manages creation of {@link ScrollbarComponent}s.
@@ -31,25 +25,43 @@ class ScrollbarComponentSystem extends ComponentSystem {
         this.id = 'scrollbar';
 
         this.ComponentType = ScrollbarComponent;
-        this.DataType = ScrollbarComponentData;
-
-        this.schema = _schema;
 
         this.on('add', this._onAddComponent, this);
-        this.on('beforeremove', this._onRemoveComponent, this);
+        this.on('beforeremove', this.onBeforeRemove, this);
     }
 
     initializeComponentData(component, data, properties) {
-        super.initializeComponentData(component, data, _schema);
-        component.handleEntity = data.handleEntity;
+        for (let i = 0; i < _properties.length; i++) {
+            const property = _properties[i];
+            if (data.hasOwnProperty(property)) {
+                component[property] = data[property];
+            }
+        }
+
+        super.initializeComponentData(component, data);
+    }
+
+    cloneComponent(entity, clone) {
+        const c = entity.scrollbar;
+
+        const data = {
+            enabled: c.enabled
+        };
+
+        for (let i = 0; i < _properties.length; i++) {
+            const property = _properties[i];
+            data[property] = c[property];
+        }
+
+        return this.addComponent(clone, data);
     }
 
     _onAddComponent(entity) {
         entity.fire('scrollbar:add');
     }
 
-    _onRemoveComponent(entity, component) {
-        component.onRemove();
+    onBeforeRemove(entity, component) {
+        component.onBeforeRemove();
     }
 }
 

@@ -1,0 +1,19 @@
+{
+    "extends": "./tsconfig.base.json",
+    "compilerOptions": {
+        "checkJs": false,
+        "jsx": "react-jsx",
+        "jsxImportSource": "react"
+    },
+    "include": [
+        "src/examples/**/*.example.mjs",
+        "src/examples/**/*.controls.mjs",
+        "src/examples/**/*.controls.jsx",
+        "src/app/**/*.d.ts"
+    ],
+    "exclude": [
+        "node_modules",
+        "dist",
+        "assets/wasm"
+    ]
+}

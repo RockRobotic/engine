@@ -15,7 +15,7 @@ import { WorldClustersDebug } from '../lighting/world-clusters-debug.js';
 import { Renderer } from './renderer.js';
 import { LightCamera } from './light-camera.js';
 import { RenderPassForward } from './render-pass-forward.js';
-import { RenderPassPostprocessing } from './render-pass-postprocessing.js';
+import { FramePassPostprocessing } from './frame-pass-postprocessing.js';
 import { BINDGROUP_VIEW } from '../../platform/graphics/constants.js';
 
 /**
@@ -132,6 +132,7 @@ class ForwardRenderer extends Renderer {
         this.shadowCascadeDistancesId = [];
         this.shadowCascadeCountId = [];
         this.shadowCascadeBlendId = [];
+        this.shadowCascadeRadiiId = [];
 
         this.screenSizeId = scope.resolve('uScreenSize');
         this._screenSize = new Float32Array(4);
@@ -210,6 +211,7 @@ class ForwardRenderer extends Renderer {
         this.shadowCascadeDistancesId[i] = scope.resolve(`${light}_shadowCascadeDistances`);
         this.shadowCascadeCountId[i] = scope.resolve(`${light}_shadowCascadeCount`);
         this.shadowCascadeBlendId[i] = scope.resolve(`${light}_shadowCascadeBlend`);
+        this.shadowCascadeRadiiId[i] = scope.resolve(`${light}_shadowCascadeRadii`);
     }
 
     setLTCDirectionalLight(wtm, cnt, dir, campos, far) {
@@ -281,20 +283,44 @@ class ForwardRenderer extends Renderer {
                 this.shadowCascadeCountId[cnt].setValue(directional.numCascades);
                 this.shadowCascadeBlendId[cnt].setValue(1 - directional.cascadeBlend);
                 this.lightShadowIntensity[cnt].setValue(directional.shadowIntensity);
-                this.lightSoftShadowParamsId[cnt].setValue(directional._softShadowParams);
 
-                const shadowRT = lightRenderData.shadowCamera.renderTarget;
-                if (shadowRT) {
-                    this.lightShadowSearchAreaId[cnt].setValue(directional.penumbraSize / lightRenderData.shadowCamera.renderTarget.width * lightRenderData.projectionCompensation);
+                // PCSS-only uniforms — skipped for the common PCF / VSM paths, which don't
+                // declare or read them in the shader.
+                if (directional._isPcss) {
+
+                    this.lightSoftShadowParamsId[cnt].setValue(directional._softShadowParams);
+
+                    const shadowRT = lightRenderData.shadowCamera.renderTarget;
+                    if (shadowRT) {
+                        this.lightShadowSearchAreaId[cnt].setValue(directional.penumbraSize / lightRenderData.shadowCamera.renderTarget.width * lightRenderData.projectionCompensation);
+                    }
+
+                    const cameraParams = directional._shadowCameraParams;
+                    cameraParams.length = 4;
+                    // ortho radius (world half-extent of the directional shadow camera) — consumed by world-space PCSS
+                    cameraParams[0] = lightRenderData.projectionCompensation;
+                    cameraParams[1] = lightRenderData.shadowCamera._farClip;
+                    cameraParams[2] = lightRenderData.shadowCamera._nearClip;
+                    cameraParams[3] = 1;
+                    this.lightCameraParamsId[cnt].setValue(cameraParams);
+
+                    // Per-cascade ortho radii. Only cameraParams.x (the ortho radius) varies per
+                    // cascade — the depth range is cascade-stable thanks to the union AABB. The
+                    // shader overrides cameraParams.x with the radius of the cascade a fragment
+                    // samples from, so far cascades don't inherit cascade 0's much smaller radius
+                    // (which would over-soften them). Packed into a single vec4 (max 4 cascades).
+                    // Stored per-light (setValue keeps the reference, read at draw time) so
+                    // multiple directional PCSS lights don't alias one shared buffer. Allocated
+                    // lazily here so only directional PCSS lights ever create it.
+                    const radii = directional._shadowCascadeRadii ??= new Float32Array(4);
+                    for (let c = 0; c < 4; c++) {
+                        const r = c < directional.numCascades ? directional.getRenderData(camera, c).projectionCompensation : 0;
+                        // fall back to cascade 0's radius for unused / not-yet-culled cascades to
+                        // avoid a zero ortho radius (which would divide-by-zero in the shader)
+                        radii[c] = r > 0 ? r : lightRenderData.projectionCompensation;
+                    }
+                    this.shadowCascadeRadiiId[cnt].setValue(radii);
                 }
-
-                const cameraParams = directional._shadowCameraParams;
-                cameraParams.length = 4;
-                cameraParams[0] = 0; // unused
-                cameraParams[1] = lightRenderData.shadowCamera._farClip;
-                cameraParams[2] = lightRenderData.shadowCamera._nearClip;
-                cameraParams[3] = 1;
-                this.lightCameraParamsId[cnt].setValue(cameraParams);
 
                 const params = directional._shadowRenderParams;
                 params.length = 4;
@@ -519,6 +545,12 @@ class ForwardRenderer extends Renderer {
             /** @type {MeshInstance} */
             const drawCall = drawCalls[i];
 
+            // skip mesh instances that are not rendered in this shader pass (inlined bit test to
+            // avoid a function call in this hot loop)
+            if ((drawCall.shaderPassMask & (1 << pass)) === 0) {
+                continue;
+            }
+
             // #if _PROFILER
             if (camera === ForwardRenderer.skipRenderCamera) {
                 if (ForwardRenderer._skipRenderCounter >= ForwardRenderer.skipRenderAfter) {
@@ -582,7 +614,14 @@ class ForwardRenderer extends Renderer {
         const clusteredLightingEnabled = scene.clusteredLightingEnabled;
 
         // multiview xr rendering
-        const viewList = camera.xr?.session && camera.xr.views.list.length ? camera.xr.views.list : null;
+        const viewList = camera.xrActive && camera.xrViews.length ? camera.xrViews : null;
+
+        // when the FramePassMultiView wrapper is iterating XR views, render only the active one
+        // (xrCurrentViewIndex === -1 means "no wrapper active": fall back to the default behaviour
+        // of rendering all views or the single non-XR view)
+        const activeView = device.xrCurrentViewIndex ?? -1;
+        const viewListStart = (viewList && activeView >= 0) ? activeView : 0;
+        const viewListEnd = (viewList && activeView >= 0) ? activeView + 1 : (viewList ? viewList.length : 0);
 
         // Render the scene
         const preparedCallsCount = preparedCalls.drawCalls.length;
@@ -660,7 +699,7 @@ class ForwardRenderer extends Renderer {
             const indirectData = drawCall.getDrawCommands(camera);
 
             if (viewList) {
-                for (let v = 0; v < viewList.length; v++) {
+                for (let v = viewListStart; v < viewListEnd; v++) {
                     const view = viewList[v];
 
                     device.setViewport(view.viewport.x, view.viewport.y, view.viewport.z, view.viewport.w);
@@ -675,8 +714,8 @@ class ForwardRenderer extends Renderer {
                         this.setupViewUniforms(view, v);
                     }
 
-                    const first = v === 0;
-                    const last = v === viewList.length - 1;
+                    const first = v === viewListStart;
+                    const last = v === viewListEnd - 1;
                     device.draw(mesh.primitive[style], indexBuffer, instancingData?.count, indirectData, first, last);
 
                     this._forwardDrawCalls++;
@@ -910,19 +949,23 @@ class ForwardRenderer extends Renderer {
 
             const renderAction = renderActions[i];
             const { layer, camera } = renderAction;
+            const mv = this._isMultiview(camera);
 
             if (renderAction.useCameraPasses)  {
 
                 Debug.call(() => {
                     if (camera.postEffects.effects.length > 0) {
-                        Debug.warnOnce(`Camera '${camera.entity.name}' uses render passes, which are not compatible with post-effects scripts. Rendering of the post-effects is ignored, but they should not be attached to the camera.`);
+                        Debug.warnOnce(`Camera '${camera.entity.name}' uses frame passes, which are not compatible with post-effects scripts. Rendering of the post-effects is ignored, but they should not be attached to the camera.`);
                     }
                 });
 
-                // schedule render passes from the camera
-                camera.camera.renderPasses.forEach((renderPass) => {
+                // schedule frame passes from the camera, capturing them into a FramePassMultiView
+                // wrapper if the camera needs per-view replication
+                if (mv) frameGraph.beginMultiView(this.device);
+                camera.camera.framePasses.forEach((renderPass) => {
                     frameGraph.addRenderPass(renderPass);
                 });
+                if (mv) frameGraph.endMultiView();
 
             } else {
 
@@ -942,13 +985,21 @@ class ForwardRenderer extends Renderer {
                 const isNextLayerGrabPass = isNextLayerDepth && (camera.renderSceneColorMap || camera.renderSceneDepthMap);
                 const nextNeedDirShadows = nextRenderAction ? (nextRenderAction.firstCameraUse && this.cameraDirShadowLights.has(nextRenderAction.camera.camera)) : false;
 
-                // end of the block using the same render target if the next render action uses a different render target, or needs directional shadows
-                // rendered before it or similar or needs other pass before it.
+                // end of the block using the same render target if the next render action uses a different render target,
+                // a different camera, or needs directional shadows rendered before it or similar.
                 if (!nextRenderAction || nextRenderAction.renderTarget !== renderTarget ||
+                    nextRenderAction.camera !== camera ||
                     nextNeedDirShadows || isNextLayerGrabPass || isGrabPass) {
 
                     // render the render actions in the range
                     const isDepthOnly = isDepthLayer && startIndex === i;
+
+                    if (mv && (camera.renderSceneColorMap || camera.renderSceneDepthMap || (renderAction.triggerPostprocess && camera?.onPostprocessing))) {
+                        Debug.errorOnce('FramePassMultiView: depth/color grab passes and per-camera postprocessing are not yet supported with WebGPU stereo XR; rendering may be incorrect.');
+                    }
+
+                    if (mv) frameGraph.beginMultiView(this.device);
+
                     if (!isDepthOnly) {
                         this.addMainRenderPass(frameGraph, layerComposition, renderTarget, startIndex, i);
                     }
@@ -969,14 +1020,31 @@ class ForwardRenderer extends Renderer {
 
                     // postprocessing
                     if (renderAction.triggerPostprocess && camera?.onPostprocessing) {
-                        const renderPass = new RenderPassPostprocessing(this.device, this, renderAction);
+                        const renderPass = new FramePassPostprocessing(this.device, this, renderAction);
                         frameGraph.addRenderPass(renderPass);
                     }
+
+                    if (mv) frameGraph.endMultiView();
 
                     newStart = true;
                 }
             }
         }
+    }
+
+    /**
+     * @param {any} camera - The camera component for the current render action. The XR data lives on
+     * the underlying `Camera` (`CameraComponent.camera`), as `xrActive` / `xrViews`, not on the
+     * component itself, so we dereference it before checking.
+     * @returns {boolean} True if the camera should have its passes replicated per XR view (currently
+     * gated to the WebGPU backend; other backends keep the existing single-pass multi-viewport flow).
+     * @private
+     */
+    _isMultiview(camera) {
+        const sceneCamera = camera.camera;
+        return this.device.isWebGPU &&
+            !!sceneCamera?.xrActive &&
+            sceneCamera.xrViews.length >= 2;
     }
 
     /**
@@ -1022,6 +1090,11 @@ class ForwardRenderer extends Renderer {
         // visibility culling of lights, meshInstances, shadows casters
         // after this the scene culling is done and script callbacks can be called to report which objects are visible
         this.cullComposition(comp);
+
+        // Dispatch gsplat directional shadow culls. Runs after cullComposition so each directional
+        // light's shadow-camera frustum has been fitted, and before the frame graph renders the
+        // shadow maps. Only the GPU-sort (hybrid) gsplat path uses this; the CPU-sort path self-casts.
+        this.gsplatDirector?.updateShadows();
 
         // GPU update for visible objects requiring one
         this.gpuUpdate(this.processingMeshInstances);

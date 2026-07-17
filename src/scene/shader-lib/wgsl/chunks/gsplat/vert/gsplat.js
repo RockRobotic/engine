@@ -1,4 +1,7 @@
 export default /* wgsl */`
+#ifdef GSPLAT_USER_VARYINGS
+    #include "gsplatUserVaryingsVS"
+#endif
 #include "gsplatCommonVS"
 
 varying gaussianUV: half2;
@@ -56,7 +59,12 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     }
 
     // read color (~11 bit source data, use half precision)
-    var clr: half4 = half4(getColor());
+    #ifdef GSPLAT_SEPARATE_OPACITY
+        let opacity = getOpacity(); // must run before getColor() to cache color data
+        var clr: half4 = half4(vec4f(getColor(), opacity));
+    #else
+        var clr: half4 = half4(getColor());
+    #endif
 
     #if GSPLAT_AA
         clr.a = clr.a * corner.aaFactor;
@@ -82,8 +90,13 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     modifySplatColor(modelCenter, &clrF32);
     clr = half4(clrF32);
 
-    // discard splats with alpha too low to contribute any visible pixel
-    if (half(255.0) * clr.w <= half(1.0)) {
+    // discard splats with alpha too low (threshold matches fragment pass)
+    #if defined(SHADOW_PASS) || defined(PICK_PASS) || defined(PREPASS_PASS)
+        let alphaClipValue = half(uniform.alphaClip);
+    #else
+        let alphaClipValue = half(uniform.alphaClipForward);
+    #endif
+    if (clr.w <= alphaClipValue) {
         output.position = discardVec;
         return output;
     }
@@ -101,6 +114,11 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     #endif
     output.gaussianUV = corner.uv;
 
+    // copy user varying values (written by the modify functions) to the outputs
+    #ifdef GSPLAT_USER_VARYINGS
+        #include "gsplatUserVaryingsFlushVS"
+    #endif
+
     #ifdef GSPLAT_OVERDRAW
         // Overdraw visualization mode: color by elevation
         let t: f32 = clamp(center.modelCenterOriginal.y / 20.0, 0.0, 1.0);
@@ -108,7 +126,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         clr.a = clr.a * half(1.0 / 32.0) * half(uniform.colorRampIntensity);
         output.gaussianColor = half4(half3(rampColor), clr.a);
     #else
-        output.gaussianColor = half4(half3(prepareOutputFromGamma(max(vec3f(clr.xyz), vec3f(0.0)))), clr.w);
+        output.gaussianColor = half4(half3(prepareOutputFromGamma(max(vec3f(clr.xyz), vec3f(0.0)), -center.view.z)), clr.w);
     #endif
 
     #ifndef DITHER_NONE

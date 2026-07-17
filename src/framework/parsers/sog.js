@@ -120,6 +120,8 @@ class SogParser {
     }
 
     async loadTextures(url, callback, asset, meta) {
+        const gsplatCentersEnabledAtLoad = this.app.scene?.gsplatCentersEnabled !== false;
+
         // transform meta to latest shape
         if (meta.version !== 2) {
             Debug.deprecated('Loading SOG v1 data which is deprecated. Please recompress your scene with latest tools.');
@@ -132,12 +134,13 @@ class SogParser {
 
         const textures = {};
         const promises = [];
+        const base = window.document?.baseURI ?? window.location.href;
 
         subs.forEach((sub) => {
             const files = meta[sub]?.files ?? [];
             textures[sub] = files.map((filename) => {
                 const texture = new Asset(filename, 'texture', {
-                    url: asset.options?.mapUrl?.(filename) ?? (new URL(filename, new URL(url.load, window.location.href).toString())).toString(),
+                    url: asset.options?.mapUrl?.(filename) ?? (new URL(filename, new URL(url.load, base).toString())).toString(),
                     filename
                 }, {
                     mipmaps: false
@@ -162,7 +165,14 @@ class SogParser {
         // Track if asset was unloaded during async loading
         let unloaded = false;
 
-        // When the parent gsplat asset unloads, remove and unload child texture assets
+        // Set once the GSplatSogResource takes ownership of the textures: from then on they may
+        // only be destroyed through the resource's (ref-count deferred) destroy, as the unified
+        // world may still be rendering from them when the asset unloads.
+        let ownedByResource = false;
+
+        // When the parent gsplat asset unloads, remove child texture assets from the registry.
+        // Destroy their texture resources only while the load is still in flight (cancellation);
+        // once owned by the resource, destruction is left to it.
         asset.once('unload', () => {
             unloaded = true;
 
@@ -170,8 +180,16 @@ class SogParser {
                 // remove from registry
                 assets.remove(t);
 
-                // destroys resource
-                t.unload();
+                if (!ownedByResource) {
+                    // destroys resource
+                    t.unload();
+                } else {
+                    // The resource destroys the textures (possibly deferred), but they stay in
+                    // the loader cache as t.unload() is not called. Clear the cache entries so
+                    // a later load of the same urls recreates the textures instead of reusing
+                    // the cached, destroyed ones.
+                    assets._loader.clearCache(t.getFileUrl(), t.type);
+                }
             });
         });
 
@@ -207,10 +225,6 @@ class SogParser {
         data.shBands = GSplatSogData.calcBands(data.sh_centroids?.width);
 
         const decompress = asset.data?.decompress;
-        const minimalMemory = asset.options?.minimalMemory ?? false;
-
-        // Pass minimalMemory to data
-        data.minimalMemory = minimalMemory;
 
         if (!decompress) {
             if (this._shouldAbort(asset, unloaded)) {
@@ -220,7 +234,10 @@ class SogParser {
             }
 
             // no need to prepare gpu data if decompressing
-            await data.prepareGpuData();
+            data.prepareCodebook();
+            if (gsplatCentersEnabledAtLoad) {
+                await data.prepareGpuData();
+            }
         }
 
         if (this._shouldAbort(asset, unloaded)) {
@@ -229,9 +246,14 @@ class SogParser {
             return;
         }
 
+        const prepareCenters = gsplatCentersEnabledAtLoad;
         const resource = decompress ?
-            new GSplatResource(this.app.graphicsDevice, await data.decompress()) :
-            new GSplatSogResource(this.app.graphicsDevice, data);
+            new GSplatResource(this.app.graphicsDevice, await data.decompress(), { prepareCenters }) :
+            new GSplatSogResource(this.app.graphicsDevice, data, { prepareCenters });
+
+        // the sog resource now owns the textures in `data` (when decompressing, the decompressed
+        // data was copied out instead and the textures stay with the texture assets)
+        ownedByResource = !decompress;
 
         if (this._shouldAbort(asset, unloaded)) {
             resource.destroy();

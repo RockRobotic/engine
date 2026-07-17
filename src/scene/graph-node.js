@@ -127,22 +127,13 @@ class GraphNode extends EventHandler {
     tags = new Tags(this);
 
     // Local space properties of transform (only first 3 are settable by the user)
-    /**
-     * @type {Vec3}
-     * @private
-     */
+    /** @private */
     localPosition = new Vec3();
 
-    /**
-     * @type {Quat}
-     * @private
-     */
+    /** @private */
     localRotation = new Quat();
 
-    /**
-     * @type {Vec3}
-     * @private
-     */
+    /** @private */
     localScale = new Vec3(1, 1, 1);
 
     /**
@@ -152,22 +143,13 @@ class GraphNode extends EventHandler {
     localEulerAngles = new Vec3(); // Only calculated on request
 
     // World space properties of transform
-    /**
-     * @type {Vec3}
-     * @private
-     */
+    /** @private */
     position = new Vec3();
 
-    /**
-     * @type {Quat}
-     * @private
-     */
+    /** @private */
     rotation = new Quat();
 
-    /**
-     * @type {Vec3}
-     * @private
-     */
+    /** @private */
     eulerAngles = new Vec3();
 
     /**
@@ -176,22 +158,13 @@ class GraphNode extends EventHandler {
      */
     _scale = null;
 
-    /**
-     * @type {Mat4}
-     * @private
-     */
+    /** @private */
     localTransform = new Mat4();
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _dirtyLocal = false;
 
-    /**
-     * @type {number}
-     * @private
-     */
+    /** @private */
     _aabbVer = 0;
 
     /**
@@ -199,21 +172,14 @@ class GraphNode extends EventHandler {
      * automatically freezes and unfreezes objects whenever required. Segregating dynamic and
      * stationary nodes into subhierarchies allows to reduce sync time significantly.
      *
-     * @type {boolean}
      * @private
      */
     _frozen = false;
 
-    /**
-     * @type {Mat4}
-     * @private
-     */
+    /** @private */
     worldTransform = new Mat4();
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _dirtyWorld = false;
 
     /**
@@ -222,21 +188,14 @@ class GraphNode extends EventHandler {
      * transform is not negatively scaled. If the value is -1, the world transform is negatively
      * scaled.
      *
-     * @type {number}
      * @private
      */
     _worldScaleSign = 0;
 
-    /**
-     * @type {Mat3}
-     * @private
-     */
+    /** @private */
     _normalMatrix = new Mat3();
 
-    /**
-     * @type {boolean}
-     * @private
-     */
+    /** @private */
     _dirtyNormal = true;
 
     /**
@@ -269,17 +228,13 @@ class GraphNode extends EventHandler {
      */
     _children = [];
 
-    /**
-     * @type {number}
-     * @private
-     */
+    /** @private */
     _graphDepth = 0;
 
     /**
      * Represents enabled state of the entity. If the entity is disabled, the entity including all
      * children are excluded from updates.
      *
-     * @type {boolean}
      * @private
      */
     _enabled = true;
@@ -288,15 +243,11 @@ class GraphNode extends EventHandler {
      * Represents enabled state of the entity in the hierarchy. It's true only if this entity and
      * all parent entities all the way to the scene's root are enabled.
      *
-     * @type {boolean}
      * @private
      */
     _enabledInHierarchy = false;
 
-    /**
-     * @type {boolean}
-     * @ignore
-     */
+    /** @ignore */
     scaleCompensation = false;
 
     /**
@@ -313,7 +264,7 @@ class GraphNode extends EventHandler {
     /**
      * Gets the normalized local space X-axis vector of the graph node in world space.
      *
-     * @type {Vec3}
+     * @type {Readonly<Vec3>}
      */
     get right() {
         if (!this._right) {
@@ -325,7 +276,7 @@ class GraphNode extends EventHandler {
     /**
      * Gets the normalized local space Y-axis vector of the graph node in world space.
      *
-     * @type {Vec3}
+     * @type {Readonly<Vec3>}
      */
     get up() {
         if (!this._up) {
@@ -337,7 +288,7 @@ class GraphNode extends EventHandler {
     /**
      * Gets the normalized local space negative Z-axis vector of the graph node in world space.
      *
-     * @type {Vec3}
+     * @type {Readonly<Vec3>}
      */
     get forward() {
         if (!this._forward) {
@@ -436,9 +387,10 @@ class GraphNode extends EventHandler {
     }
 
     /**
-     * Gets the children of this graph node.
+     * Gets the children of this graph node. Use addChild, insertChild, removeChild or reparent to
+     * change the hierarchy.
      *
-     * @type {GraphNode[]}
+     * @type {ReadonlyArray<GraphNode>}
      */
     get children() {
         return this._children;
@@ -590,7 +542,7 @@ class GraphNode extends EventHandler {
      * string then it represents the name of a field or a method of the node. If this is the name
      * of a field then the value passed as the second argument will be checked for equality. If
      * this is the name of a function then the return value of the function will be checked for
-     * equality against the valued passed as the second argument to this function.
+     * equality against the value passed as the second argument to this function.
      * @param {*} [value] - If the first argument (attr) is a property name then this value
      * will be checked against the value of the property.
      * @returns {GraphNode[]} The array of graph nodes that match the search criteria.
@@ -626,10 +578,10 @@ class GraphNode extends EventHandler {
      * findOne. If it's a string then it represents the name of a field or a method of the node. If
      * this is the name of a field then the value passed as the second argument will be checked for
      * equality. If this is the name of a function then the return value of the function will be
-     * checked for equality against the valued passed as the second argument to this function.
+     * checked for equality against the value passed as the second argument to this function.
      * @param {*} [value] - If the first argument (attr) is a property name then this value
      * will be checked against the value of the property.
-     * @returns {GraphNode|null} A graph node that match the search criteria. Returns null if no
+     * @returns {GraphNode|null} A graph node that matches the search criteria. Returns null if no
      * node is found.
      * @example
      * // Find the first node that is called 'head' and has a model component
@@ -647,23 +599,23 @@ class GraphNode extends EventHandler {
 
     /**
      * Return all graph nodes that satisfy the search query. Query can be simply a string, or comma
-     * separated strings, to have inclusive results of assets that match at least one query. A
+     * separated strings, to have inclusive results of graph nodes that match at least one query. A
      * query that consists of an array of tags can be used to match graph nodes that have each tag
-     * of array.
+     * of the array.
      *
      * @param {...*} query - Name of a tag or array of tags.
      * @returns {GraphNode[]} A list of all graph nodes that match the query.
      * @example
-     * // Return all graph nodes that tagged by `animal`
+     * // Return all graph nodes tagged with `animal`
      * const animals = node.findByTag("animal");
      * @example
-     * // Return all graph nodes that tagged by `bird` OR `mammal`
+     * // Return all graph nodes tagged with `bird` OR `mammal`
      * const birdsAndMammals = node.findByTag("bird", "mammal");
      * @example
-     * // Return all assets that tagged by `carnivore` AND `mammal`
+     * // Return all graph nodes tagged with `carnivore` AND `mammal`
      * const meatEatingMammals = node.findByTag(["carnivore", "mammal"]);
      * @example
-     * // Return all assets that tagged by (`carnivore` AND `mammal`) OR (`carnivore` AND `reptile`)
+     * // Return all graph nodes tagged with (`carnivore` AND `mammal`) OR (`carnivore` AND `reptile`)
      * const meatEatingMammalsAndReptiles = node.findByTag(["carnivore", "mammal"], ["carnivore", "reptile"]);
      */
     findByTag(...query) {
@@ -687,7 +639,7 @@ class GraphNode extends EventHandler {
     /**
      * Get the first node found in the graph with the name. The search is depth first.
      *
-     * @param {string} name - The name of the graph.
+     * @param {string} name - The name of the node.
      * @returns {GraphNode|null} The first node to be found matching the supplied name. Returns
      * null if no node is found.
      */
@@ -790,7 +742,7 @@ class GraphNode extends EventHandler {
      * Important: The value returned by this function should be considered read-only. In order to
      * set the world space rotation of the graph node, use {@link setEulerAngles}.
      *
-     * @returns {Vec3} The world space rotation of the graph node in Euler angle form.
+     * @returns {Readonly<Vec3>} The world space rotation of the graph node in Euler angle form.
      * @example
      * const angles = this.entity.getEulerAngles();
      * angles.y = 180; // rotate the entity around Y by 180 degrees
@@ -808,7 +760,7 @@ class GraphNode extends EventHandler {
      * Important: The value returned by this function should be considered read-only. In order to
      * set the local space rotation of the graph node, use {@link setLocalEulerAngles}.
      *
-     * @returns {Vec3} The local space rotation of the graph node as Euler angles in XYZ order.
+     * @returns {Readonly<Vec3>} The local space rotation of the graph node as Euler angles in XYZ order.
      * @example
      * const angles = this.entity.getLocalEulerAngles();
      * angles.y = 180;
@@ -824,9 +776,9 @@ class GraphNode extends EventHandler {
      * {@link Vec3}. The returned vector should be considered read-only. To update the local
      * position, use {@link setLocalPosition}.
      *
-     * @returns {Vec3} The local space position of the graph node.
+     * @returns {Readonly<Vec3>} The local space position of the graph node.
      * @example
-     * const position = this.entity.getLocalPosition();
+     * const position = this.entity.getLocalPosition().clone();
      * position.x += 1; // move the entity 1 unit along x.
      * this.entity.setLocalPosition(position);
      */
@@ -839,7 +791,7 @@ class GraphNode extends EventHandler {
      * {@link Quat}. The returned quaternion should be considered read-only. To update the local
      * rotation, use {@link setLocalRotation}.
      *
-     * @returns {Quat} The local space rotation of the graph node as a quaternion.
+     * @returns {Readonly<Quat>} The local space rotation of the graph node as a quaternion.
      * @example
      * const rotation = this.entity.getLocalRotation();
      */
@@ -852,9 +804,9 @@ class GraphNode extends EventHandler {
      * {@link Vec3}. The returned vector should be considered read-only. To update the local scale,
      * use {@link setLocalScale}.
      *
-     * @returns {Vec3} The local space scale of the graph node.
+     * @returns {Readonly<Vec3>} The local space scale of the graph node.
      * @example
-     * const scale = this.entity.getLocalScale();
+     * const scale = this.entity.getLocalScale().clone();
      * scale.x = 100;
      * this.entity.setLocalScale(scale);
      */
@@ -866,7 +818,7 @@ class GraphNode extends EventHandler {
      * Get the local transform matrix for this graph node. This matrix is the transform relative to
      * the node's parent's world transformation matrix.
      *
-     * @returns {Mat4} The node's local transformation matrix.
+     * @returns {Readonly<Mat4>} The node's local transformation matrix.
      * @example
      * const transform = this.entity.getLocalTransform();
      */
@@ -883,9 +835,9 @@ class GraphNode extends EventHandler {
      * {@link Vec3}. The value returned by this function should be considered read-only. In order
      * to set the world space position of the graph node, use {@link setPosition}.
      *
-     * @returns {Vec3} The world space position of the graph node.
+     * @returns {Readonly<Vec3>} The world space position of the graph node.
      * @example
-     * const position = this.entity.getPosition();
+     * const position = this.entity.getPosition().clone();
      * position.x = 10;
      * this.entity.setPosition(position);
      */
@@ -899,7 +851,7 @@ class GraphNode extends EventHandler {
      * {@link Quat}. The value returned by this function should be considered read-only. In order
      * to set the world space rotation of the graph node, use {@link setRotation}.
      *
-     * @returns {Quat} The world space rotation of the graph node as a quaternion.
+     * @returns {Readonly<Quat>} The world space rotation of the graph node as a quaternion.
      * @example
      * const rotation = this.entity.getRotation();
      */
@@ -916,7 +868,7 @@ class GraphNode extends EventHandler {
      * read-only. Note that it is not possible to set the world space scale of a graph node
      * directly.
      *
-     * @returns {Vec3} The world space scale of the graph node.
+     * @returns {Readonly<Vec3>} The world space scale of the graph node.
      * @example
      * const scale = this.entity.getScale();
      * @ignore
@@ -931,7 +883,7 @@ class GraphNode extends EventHandler {
     /**
      * Get the world transformation matrix for this graph node.
      *
-     * @returns {Mat4} The node's world transformation matrix.
+     * @returns {Readonly<Mat4>} The node's world transformation matrix.
      * @example
      * const transform = this.entity.getWorldTransform();
      */

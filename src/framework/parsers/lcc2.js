@@ -79,8 +79,8 @@ function translateNode(node, depth) {
     const childObj = node.child;
     if (childObj) {
         const keys = Object.keys(childObj)
-            .map(k => [parseInt(k, 10), k])
-            .sort((a, b) => a[0] - b[0]);
+        .map(k => [parseInt(k, 10), k])
+        .sort((a, b) => a[0] - b[0]);
         for (const [, key] of keys) {
             children.push(translateNode(childObj[key], depth + 1));
         }

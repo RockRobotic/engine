@@ -52,9 +52,12 @@ class ComponentSystem extends EventHandler {
      */
     addComponent(entity, data = {}) {
         const component = new this.ComponentType(this, entity);
-        const componentData = new this.DataType();
 
-        this.store[entity.getGuid()] = {
+        // Engine components no longer define a DataType - the empty object is stored so that
+        // legacy paths (the `data` getter, default cloneComponent) keep working
+        const componentData = this.DataType ? new this.DataType() : {};
+
+        this.store[entity.guid] = {
             entity: entity,
             data: componentData
         };
@@ -62,7 +65,7 @@ class ComponentSystem extends EventHandler {
         entity[this.id] = component;
         entity.c[this.id] = component;
 
-        this.initializeComponentData(component, data, []);
+        this.initializeComponentData(component, data);
 
         this.fire('add', entity, component);
 
@@ -80,13 +83,13 @@ class ComponentSystem extends EventHandler {
      */
     removeComponent(entity) {
         const id = this.id;
-        const record = this.store[entity.getGuid()];
+        const record = this.store[entity.guid];
         const component = entity.c[id];
 
         component.fire('beforeremove');
         this.fire('beforeremove', entity, component);
 
-        delete this.store[entity.getGuid()];
+        delete this.store[entity.guid];
 
         entity[id] = undefined;
         delete entity.c[id];
@@ -104,51 +107,60 @@ class ComponentSystem extends EventHandler {
      */
     cloneComponent(entity, clone) {
         // default clone is just to add a new component with existing data
-        const src = this.store[entity.getGuid()];
+        const src = this.store[entity.guid];
         return this.addComponent(clone, src.data);
     }
 
     /**
-     * Called during {@link ComponentSystem#addComponent} to initialize the component data in the
-     * store. This can be overridden by derived Component Systems and either called by the derived
-     * System or replaced entirely.
+     * Called during {@link addComponent} to initialize the component data in the store. This can
+     * be overridden by derived Component Systems and either called by the derived System or
+     * replaced entirely.
      *
      * @param {Component} component - The component being initialized.
      * @param {object} data - The data block used to initialize the component.
-     * @param {Array<string | {name: string, type: string}>} properties - The array of property
-     * descriptors for the component. A descriptor can be either a plain property name, or an
-     * object specifying the name and type.
+     * @param {Array<string | {name: string, type: string}>} [properties] - The array of property
+     * descriptors to initialize from the data block. A descriptor can be either a plain property
+     * name, or an object specifying the name and type. This is a legacy path for external
+     * schema-based components - when omitted, the enabled state is initialized from the data
+     * block instead. Callers that handle the enabled state themselves pass an empty array.
      * @ignore
      */
     initializeComponentData(component, data = {}, properties) {
-        // initialize
-        for (let i = 0, len = properties.length; i < len; i++) {
-            const descriptor = properties[i];
-            let name, type;
+        if (properties) {
+            // Legacy path for external schema-based components: initialize each property in the
+            // list from the data block, or from the component data defaults
+            for (let i = 0, len = properties.length; i < len; i++) {
+                const descriptor = properties[i];
+                let name, type;
 
-            // If the descriptor is an object, it will have `name` and `type` members
-            if (typeof descriptor === 'object') {
-                name = descriptor.name;
-                type = descriptor.type;
-            } else {
-                // Otherwise, the descriptor is just the property name
-                name = descriptor;
-                type = undefined;
-            }
-
-            let value = data[name];
-
-            if (value !== undefined) {
-                // If we know the intended type of the value, convert the raw data
-                // into an instance of the specified type.
-                if (type !== undefined) {
-                    value = convertValue(value, type);
+                // If the descriptor is an object, it will have `name` and `type` members
+                if (typeof descriptor === 'object') {
+                    name = descriptor.name;
+                    type = descriptor.type;
+                } else {
+                    // Otherwise, the descriptor is just the property name
+                    name = descriptor;
+                    type = undefined;
                 }
 
-                component[name] = value;
-            } else {
-                component[name] = component.data[name];
+                let value = data[name];
+
+                if (value !== undefined) {
+                    // If we know the intended type of the value, convert the raw data
+                    // into an instance of the specified type.
+                    if (type !== undefined) {
+                        value = convertValue(value, type);
+                    }
+
+                    component[name] = value;
+                } else if (component.data && name in component.data) {
+                    // apply the default value from the component data
+                    component[name] = component.data[name];
+                }
             }
+        } else if (data.enabled !== undefined) {
+            // initialize the enabled state of the component
+            component.enabled = data.enabled;
         }
 
         // after component is initialized call onEnable

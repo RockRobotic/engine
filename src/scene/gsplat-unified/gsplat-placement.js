@@ -46,8 +46,6 @@ class GSplatPlacement {
     /**
      * Unique identifier for this placement. Used by the picking system and available
      * for custom shader effects.
-     *
-     * @type {number}
      */
     id = 0;
 
@@ -60,15 +58,12 @@ class GSplatPlacement {
 
     /**
      * The LOD index for this placement.
-     *
-     * @type {number}
      */
     lodIndex = 0;
 
     /**
      * Base distance for the first LOD transition (LOD 0 to LOD 1).
      *
-     * @type {number}
      * @private
      */
     _lodBaseDistance = 5;
@@ -77,7 +72,6 @@ class GSplatPlacement {
      * Geometric multiplier between successive LOD distance thresholds.
      * Distance for LOD level i is: lodBaseDistance * lodMultiplier^i.
      *
-     * @type {number}
      * @private
      */
     _lodMultiplier = 3;
@@ -111,6 +105,48 @@ class GSplatPlacement {
     }
 
     /**
+     * Minimum allowed LOD index (inclusive). Clamped to the asset's valid range at use.
+     *
+     * @private
+     */
+    _lodRangeMin = 0;
+
+    /**
+     * Maximum allowed LOD index (inclusive). Clamped to the asset's valid range at use.
+     *
+     * @private
+     */
+    _lodRangeMax = 99;
+
+    /**
+     * @type {number}
+     */
+    set lodRangeMin(value) {
+        if (this._lodRangeMin !== value) {
+            this._lodRangeMin = value;
+            this.lodDirty = true;
+        }
+    }
+
+    get lodRangeMin() {
+        return this._lodRangeMin;
+    }
+
+    /**
+     * @type {number}
+     */
+    set lodRangeMax(value) {
+        if (this._lodRangeMax !== value) {
+            this._lodRangeMax = value;
+            this.lodDirty = true;
+        }
+    }
+
+    get lodRangeMax() {
+        return this._lodRangeMax;
+    }
+
+    /**
      * The axis-aligned bounding box for this placement, in local space.
      * Null means use resource.aabb as fallback.
      *
@@ -135,15 +171,11 @@ class GSplatPlacement {
 
     /**
      * Flag indicating LOD parameters have changed and LOD needs re-evaluation.
-     *
-     * @type {boolean}
      */
     lodDirty = false;
 
     /**
      * Flag indicating the splat needs to be re-rendered to work buffer.
-     *
-     * @type {boolean}
      */
     renderDirty = false;
 
@@ -157,7 +189,6 @@ class GSplatPlacement {
     /**
      * Last seen format version for auto-detecting format changes.
      *
-     * @type {number}
      * @private
      */
     _lastFormatVersion = -1;

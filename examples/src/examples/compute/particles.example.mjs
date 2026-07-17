@@ -1,17 +1,24 @@
-// @config WEBGL_DISABLED
-import files from 'examples/files';
-import { deviceType, rootPath } from 'examples/utils';
+// @config
+// @flag WEBGL_DISABLED
+
 import * as pc from 'playcanvas';
+
+import { deviceType } from 'examples/context';
+
+import shaderRenderingFragmentWgsl from './shader-rendering.fragment.wgsl';
+import shaderRenderingVertexWgsl from './shader-rendering.vertex.wgsl';
+import shaderSharedWgsl from './shader-shared.wgsl';
+import shaderSimulationWgsl from './shader-simulation.wgsl';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
 const assets = {
-    orbit: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` }),
+    orbit: new pc.Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' }),
     helipad: new pc.Asset(
         'helipad-env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/helipad-env-atlas.png` },
+        { url: './assets/cubemaps/helipad-env-atlas.png' },
         { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
     )
 };
@@ -77,31 +84,15 @@ assetListLoader.load(() => {
 
     const numParticles = 1024 * 1024;
 
-    // a compute shader that will simulate the particles stored in a storage buffer
+    // a compute shader that will simulate the particles stored in a storage buffer. No bind group
+    // or uniform buffer formats are provided - the loose uniforms (count, dt, sphereCount) and the
+    // storage buffers (particles, spheres) use the simplified WGSL syntax and are reflected
+    // automatically by the engine from the shader source.
     const shader = device.supportsCompute ?
         new pc.Shader(device, {
             name: 'SimulationShader',
             shaderLanguage: pc.SHADERLANGUAGE_WGSL,
-            cshader: files['shader-shared.wgsl'] + files['shader-simulation.wgsl'],
-
-            // format of a uniform buffer used by the compute shader
-            computeUniformBufferFormats: {
-                ub: new pc.UniformBufferFormat(device, [
-                    new pc.UniformFormat('count', pc.UNIFORMTYPE_UINT),
-                    new pc.UniformFormat('dt', pc.UNIFORMTYPE_FLOAT),
-                    new pc.UniformFormat('sphereCount', pc.UNIFORMTYPE_UINT)
-                ])
-            },
-
-            // format of a bind group, providing resources for the compute shader
-            computeBindGroupFormat: new pc.BindGroupFormat(device, [
-                // a uniform buffer we provided the format for
-                new pc.BindUniformBufferFormat('ub', pc.SHADERSTAGE_COMPUTE),
-                // particle storage buffer
-                new pc.BindStorageBufferFormat('particles', pc.SHADERSTAGE_COMPUTE),
-                // rad only collision spheres
-                new pc.BindStorageBufferFormat('spheres', pc.SHADERSTAGE_COMPUTE, true)
-            ])
+            cshader: shaderSharedWgsl + shaderSimulationWgsl
         }) :
         null;
 
@@ -208,8 +199,8 @@ assetListLoader.load(() => {
     // material to render the particles using WGSL shader as GLSL does not have access to storage buffers
     const material = new pc.ShaderMaterial({
         uniqueName: 'ParticleRenderShader',
-        vertexWGSL: files['shader-shared.wgsl'] + files['shader-rendering.vertex.wgsl'],
-        fragmentWGSL: files['shader-shared.wgsl'] + files['shader-rendering.fragment.wgsl']
+        vertexWGSL: shaderSharedWgsl + shaderRenderingVertexWgsl,
+        fragmentWGSL: shaderSharedWgsl + shaderRenderingFragmentWgsl
     });
 
     // rendering shader needs the particle storage buffer to read the particle data
@@ -252,5 +243,3 @@ assetListLoader.load(() => {
         }
     });
 });
-
-export { app };

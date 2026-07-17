@@ -1,4 +1,5 @@
 import { Debug } from '../../core/debug.js';
+import { http } from '../../platform/net/http.js';
 
 /**
  * @import { AppBase } from '../app-base.js'
@@ -259,7 +260,9 @@ class ResourceLoader {
     }
 
     _onFailure(key, err) {
-        console.error(err);
+        // include a string-form message so external error reporters (which often JSON.stringify the
+        // arguments) get useful context, while keeping the original Error available for dev tools
+        console.error(`Failed to load resource [${key}]: ${err?.message ?? err}`, err);
         if (this._requests[key]) {
             for (let i = 0; i < this._requests[key].length; i++) {
                 this._requests[key][i](err);
@@ -333,14 +336,14 @@ class ResourceLoader {
     }
 
     /**
-     * Enables retrying of failed requests when loading assets.
+     * Enables retrying of failed requests when loading assets. Retries use exponential backoff and
+     * are also enabled by default for new applications.
      *
-     * @param {number} maxRetries - The maximum number of times to retry loading an asset. Defaults
-     * to 5.
-     * @ignore
+     * @param {number} [maxRetries] - The maximum number of times to retry loading an asset.
+     * Defaults to 5.
      */
     enableRetry(maxRetries = 5) {
-        maxRetries = Math.max(0, maxRetries) || 0;
+        maxRetries = Math.max(0, Math.floor(maxRetries)) || 0;
 
         for (const key in this._handlers) {
             this._handlers[key].maxRetries = maxRetries;
@@ -349,13 +352,40 @@ class ResourceLoader {
 
     /**
      * Disables retrying of failed requests when loading assets.
-     *
-     * @ignore
      */
     disableRetry() {
         for (const key in this._handlers) {
             this._handlers[key].maxRetries = 0;
         }
+    }
+
+    /**
+     * Sets the maximum number of asset requests that can be in flight at the same time. Additional
+     * requests are queued and dispatched as earlier ones complete. This prevents browsers from
+     * rejecting requests with `net::ERR_INSUFFICIENT_RESOURCES` when an app loads a very large
+     * number of assets at once. Set to `0` to disable throttling. Defaults to 128.
+     *
+     * Note: this is a process-global limit (it applies to the shared HTTP layer, matching the
+     * browser's per-process resource limit), so with multiple applications the last value set wins.
+     * It applies to all XHR-based requests, which covers the large majority of asset loads.
+     *
+     * @type {number}
+     * @example
+     * // never have more than 50 asset requests in flight at once
+     * app.loader.maxConcurrentRequests = 50;
+     */
+    set maxConcurrentRequests(value) {
+        // clamp to a non-negative integer (Infinity is preserved and also means "unlimited")
+        http.maxConcurrentRequests = Math.max(0, Math.floor(value)) || 0;
+    }
+
+    /**
+     * Gets the maximum number of asset requests that can be in flight at the same time.
+     *
+     * @type {number}
+     */
+    get maxConcurrentRequests() {
+        return http.maxConcurrentRequests;
     }
 
     /**

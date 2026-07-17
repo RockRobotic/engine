@@ -55,6 +55,7 @@ import { Component } from '../component.js';
  * - [Primitive Shapes](https://playcanvas.github.io/#/graphics/shapes)
  * - [Spinning Cube](https://playcanvas.github.io/#/misc/hello-world)
  *
+ * @hideconstructor
  * @category Graphics
  */
 class RenderComponent extends Component {
@@ -81,8 +82,6 @@ class RenderComponent extends Component {
 
     /**
      * Mark meshes as non-movable (optimization).
-     *
-     * @type {boolean}
      */
     isStatic = false;
 
@@ -358,9 +357,10 @@ class RenderComponent extends Component {
     }
 
     /**
-     * Gets the array of meshInstances contained in the component.
+     * Gets the array of meshInstances contained in the component. Use the setter to replace the
+     * array; do not mutate the returned array.
      *
-     * @type {MeshInstance[]}
+     * @type {ReadonlyArray<MeshInstance>}
      */
     get meshInstances() {
         return this._meshInstances;
@@ -548,7 +548,7 @@ class RenderComponent extends Component {
     /**
      * Gets the array of layer IDs ({@link Layer#id}) to which the mesh instances belong.
      *
-     * @type {number[]}
+     * @type {ReadonlyArray<number>}
      */
     get layers() {
         return this._layers;
@@ -726,7 +726,7 @@ class RenderComponent extends Component {
     set rootBone(value) {
         if (this._rootBone !== value) {
             const isString = typeof value === 'string';
-            if (this._rootBone && isString && this._rootBone.getGuid() === value) {
+            if (this._rootBone && isString && this._rootBone.guid === value) {
                 return;
             }
 
@@ -811,7 +811,7 @@ class RenderComponent extends Component {
         }
     }
 
-    onRemove() {
+    onBeforeRemove() {
         this.destroyMeshInstances();
 
         this.asset = null;
@@ -923,9 +923,8 @@ class RenderComponent extends Component {
     }
 
     /**
-     * Enable rendering of the component's {@link MeshInstance}s if hidden using
-     * {@link RenderComponent#hide}. This method sets the {@link MeshInstance#visible} property on
-     * all mesh instances to true.
+     * Enable rendering of the component's {@link MeshInstance}s if hidden using {@link hide}. This
+     * method sets the {@link MeshInstance#visible} property on all mesh instances to true.
      */
     show() {
         if (this._meshInstances) {
@@ -1069,7 +1068,7 @@ class RenderComponent extends Component {
 
     resolveDuplicatedEntityReferenceProperties(oldRender, duplicatedIdsMap) {
         if (oldRender.rootBone) {
-            this.rootBone = duplicatedIdsMap[oldRender.rootBone.getGuid()];
+            this.rootBone = duplicatedIdsMap[oldRender.rootBone.guid];
         }
     }
 }

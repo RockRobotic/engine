@@ -87,8 +87,6 @@ class Material {
 
     /**
      * The name of the material.
-     *
-     * @type {string}
      */
     name = 'Untitled';
 
@@ -96,8 +94,6 @@ class Material {
      * A unique id the user can assign to the material. The engine internally does not use this for
      * anything, and the user can assign a value to this id for any purpose they like. Defaults to
      * an empty string.
-     *
-     * @type {string}
      */
     userId = '';
 
@@ -113,7 +109,9 @@ class Material {
     variants = new Map();
 
     /**
-     * The set of defines used to generate the shader variants.
+     * The set of defines used to generate the shader variants. Mutate this only via
+     * {@link Material#setDefine} (or {@link Material#copy}); direct mutation bypasses the cached
+     * {@link Material#definesKey}.
      *
      * @type {Map<string, string>}
      * @ignore
@@ -122,6 +120,15 @@ class Material {
 
     _definesDirty = false;
 
+    /**
+     * Cached content key for {@link Material#defines}, or null when it needs recomputing. An empty
+     * defines set caches as '', so null unambiguously means "dirty".
+     *
+     * @type {string|null}
+     * @private
+     */
+    _definesKey = null;
+
     parameters = {};
 
     /**
@@ -129,8 +136,6 @@ class Material {
      * active render target based on alpha value. All fragments with an alpha value of less than
      * the alphaTest reference value will be discarded. alphaTest defaults to 0 (all fragments
      * pass).
-     *
-     * @type {number}
      */
     alphaTest = 0;
 
@@ -141,8 +146,6 @@ class Material {
      * otherwise sharp alpha cutouts, but isn't recommended for large area semi-transparent
      * surfaces. Note, that you don't need to enable blending to make alpha to coverage work. It
      * will work without it, just like alphaTest.
-     *
-     * @type {boolean}
      */
     alphaToCoverage = false;
 
@@ -461,7 +464,7 @@ class Material {
     /**
      * Sets the blend state for this material. Controls how fragment shader outputs are blended
      * when being written to the currently active render target. This overwrites blending type set
-     * using {@link Material#blendType}, and offers more control over blending.
+     * using {@link blendType}, and offers more control over blending.
      *
      * @type {BlendState}
      */
@@ -471,9 +474,9 @@ class Material {
     }
 
     /**
-     * Gets the blend state for this material.
+     * Gets the blend state for this material. Use the setter to update transparency and sort state.
      *
-     * @type {BlendState}
+     * @type {Readonly<BlendState>}
      */
     get blendState() {
         return this._blendState;
@@ -545,8 +548,8 @@ class Material {
     }
 
     /**
-     * Sets the depth state. Note that this can also be done by using {@link Material#depthTest},
-     * {@link Material#depthFunc} and {@link Material#depthWrite}.
+     * Sets the depth state. Note that this can also be done by using {@link depthTest},
+     * {@link depthFunc} and {@link depthWrite}.
      *
      * @type {DepthState}
      */
@@ -669,6 +672,7 @@ class Material {
         // defines
         this.defines.clear();
         source.defines.forEach((value, key) => this.defines.set(key, value));
+        this._definesKey = null;
 
         // shader chunks
         this._shaderChunks = source.hasShaderChunks ? new ShaderChunks() : null;
@@ -696,6 +700,7 @@ class Material {
     updateUniforms(device, scene) {
         if (this._dirtyShader) {
             this.clearVariants();
+            this._dirtyShader = false;
         }
     }
 
@@ -714,13 +719,13 @@ class Material {
      * The method will clear cached shader variants and trigger recompilation if:
      * - Modified material properties require a different shader variant (e.g., enabling/disabling
      *   textures or other properties that affect shader generation)
-     * - Material-specific shader chunks (from {@link Material#getShaderChunks}) have been modified
+     * - Material-specific shader chunks (from {@link getShaderChunks}) have been modified
      * - Global shader chunks (from {@link ShaderChunks.get}) have been modified
      * - Material defines have been changed
      *
      * Note: Shaders are not compiled immediately. Instead, existing shader variants are cleared
      * and new variants will be compiled on-demand as they are needed for different render passes
-     * (e.g., {@link SHADER_FORWARD}, {@link SHADER_SHADOW}).
+     * (e.g., forward, shadow, pick).
      *
      * When global shader chunks are modified, `update()` must be called on each material that
      * should reflect those changes.
@@ -874,6 +879,26 @@ class Material {
         }
 
         this._definesDirty ||= modified;
+        if (modified) {
+            this._definesKey = null;
+        }
+    }
+
+    /**
+     * A cached content key for the material defines, rebuilt lazily only when the defines change.
+     * Useful to cheaply detect define changes without scanning the map every frame.
+     *
+     * @type {string}
+     * @ignore
+     */
+    get definesKey() {
+        if (this._definesKey === null) {
+            this._definesKey = Array.from(this.defines)
+            .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+            .map(([k, v]) => `${k}=${v}`)
+            .join(',');
+        }
+        return this._definesKey;
     }
 
     /**
