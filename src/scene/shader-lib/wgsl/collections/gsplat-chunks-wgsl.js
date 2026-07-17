@@ -4,6 +4,8 @@ import gsplatSplatVS from '../chunks/gsplat/vert/gsplatSplat.js';
 import gsplatEvalSHVS from '../chunks/gsplat/vert/gsplatEvalSH.js';
 import gsplatHelpersVS from '../chunks/gsplat/vert/gsplatHelpers.js';
 import gsplatModifyVS from '../chunks/gsplat/vert/gsplatModify.js';
+import gsplatModifyPS from '../chunks/gsplat/frag/gsplatModify.js';
+import gsplatWorkBufferGeometryPS from '../chunks/gsplat/frag/gsplatWorkBufferGeometry.js';
 import gsplatQuatToMat3VS from '../chunks/gsplat/vert/gsplatQuatToMat3.js';
 import gsplatStructsVS from '../chunks/gsplat/vert/gsplatStructs.js';
 import gsplatCornerVS from '../chunks/gsplat/vert/gsplatCorner.js';
@@ -11,6 +13,7 @@ import gsplatOutputVS from '../chunks/gsplat/vert/gsplatOutput.js';
 import gsplatPS from '../chunks/gsplat/frag/gsplat.js';
 import gsplatSourceVS from '../chunks/gsplat/vert/gsplatSource.js';
 import gsplatVS from '../chunks/gsplat/vert/gsplat.js';
+import gsplatHybridVS from '../chunks/gsplat/vert/gsplatHybrid.js';
 import gsplatPackingPS from '../chunks/gsplat/frag/gsplatPacking.js';
 import gsplatFormatVS from '../chunks/gsplat/vert/gsplatFormat.js';
 
@@ -33,12 +36,15 @@ export const gsplatChunksWGSL = {
     gsplatEvalSHVS,
     gsplatHelpersVS,
     gsplatModifyVS,
+    gsplatModifyPS,
+    gsplatWorkBufferGeometryPS,
     gsplatStructsVS,
     gsplatQuatToMat3VS,
     gsplatOutputVS,
     gsplatPS,
     gsplatSourceVS,
     gsplatVS,
+    gsplatHybridVS,
     gsplatPackingPS,
     gsplatFormatVS,
     gsplatUncompressedVS,

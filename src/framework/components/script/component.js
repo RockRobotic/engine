@@ -8,31 +8,27 @@ import {
     SCRIPT_POST_UPDATE, SCRIPT_SWAP
 } from '../../script/constants.js';
 import { ScriptType } from '../../script/script-type.js';
-import { getScriptName } from '../../script/script.js';
+import { getScriptName, getScriptRegistryName, toLowerCamelCase } from '../../script/script.js';
 
 /**
  * @import { ScriptComponentSystem } from './system.js'
  * @import { Script } from '../../script/script.js'
  */
 
-const toLowerCamelCase = str => str[0].toLowerCase() + str.substring(1);
-
 /**
- * The ScriptComponent allows you add custom behavior to an {@link Entity} by attaching
- * your own scripts written in JavaScript (or TypeScript).
+ * The ScriptComponent enables an {@link Entity} to have custom behavior by attaching scripts
+ * written in JavaScript (or TypeScript).
  *
  * You should never need to use the ScriptComponent constructor directly. To add a
- * ScriptComponent to an Entity, use {@link Entity#addComponent}:
+ * ScriptComponent to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
  * const entity = new pc.Entity();
  * entity.addComponent('script');
  * ```
  *
- * Once the ScriptComponent is added to the entity, you can access it via the {@link Entity#script}
- * property.
- *
- * Add scripts to the entity by calling the `create` method:
+ * Once the ScriptComponent is added to the entity, you can access it via the
+ * {@link Entity#script} property:
  *
  * ```javascript
  * // Option 1: Add a script using the name registered in the ScriptRegistry
@@ -207,10 +203,6 @@ class ScriptComponent extends Component {
         this._scriptsData = null;
         this._oldState = true;
 
-        // override default 'enabled' property of base pc.Component
-        // because this is faster
-        this._enabled = true;
-
         // whether this component is currently being enabled
         this._beingEnabled = false;
         // if true then we are currently looping through
@@ -281,22 +273,13 @@ class ScriptComponent extends Component {
     }
 
     /**
-     * Gets the array of all script instances attached to an entity.
+     * Gets the array of all script instances attached to an entity. Use create, destroy and move to
+     * change attached scripts or their order.
      *
-     * @type {ScriptType[]}
+     * @type {ReadonlyArray<ScriptType>}
      */
     get scripts() {
         return this._scripts;
-    }
-
-    set enabled(value) {
-        const oldValue = this._enabled;
-        this._enabled = value;
-        this.fire('set', 'enabled', oldValue, value);
-    }
-
-    get enabled() {
-        return this._enabled;
     }
 
     onEnable() {
@@ -388,7 +371,7 @@ class ScriptComponent extends Component {
         this._endLooping(wasLooping);
     }
 
-    _onBeforeRemove() {
+    onBeforeRemove() {
         this.fire('remove');
 
         const wasLooping = this._beginLooping();
@@ -612,9 +595,9 @@ class ScriptComponent extends Component {
 
             const newGuidArray = oldValue.slice();
             for (let i = 0; i < len; i++) {
-                const guid = newGuidArray[i] instanceof Entity ? newGuidArray[i].getGuid() : newGuidArray[i];
+                const guid = newGuidArray[i] instanceof Entity ? newGuidArray[i].guid : newGuidArray[i];
                 if (duplicatedIdsMap[guid]) {
-                    newGuidArray[i] = useGuid ? duplicatedIdsMap[guid].getGuid() : duplicatedIdsMap[guid];
+                    newGuidArray[i] = useGuid ? duplicatedIdsMap[guid].guid : duplicatedIdsMap[guid];
                 }
             }
 
@@ -622,7 +605,7 @@ class ScriptComponent extends Component {
         } else {
             // handle regular entity attribute
             if (oldValue instanceof Entity) {
-                oldValue = oldValue.getGuid();
+                oldValue = oldValue.guid;
             } else if (typeof oldValue !== 'string') {
                 return;
             }
@@ -716,14 +699,26 @@ class ScriptComponent extends Component {
         } else if (scriptType) {
 
             const inferredScriptName = getScriptName(scriptType);
-            const lowerInferredScriptName = toLowerCamelCase(inferredScriptName);
 
-            if (!(scriptType.prototype instanceof ScriptType) && !scriptType.scriptName) {
-                Debug.warnOnce(`The Script class "${inferredScriptName}" must have a static "scriptName" property: \`${inferredScriptName}.scriptName = "${lowerInferredScriptName}";\`. This will be an error in future versions of PlayCanvas.`);
+            // a `scriptName` declared on THIS class; an inherited one would belong to a base class
+            const ownScriptName = Object.prototype.hasOwnProperty.call(scriptType, 'scriptName') && scriptType.scriptName;
+
+            if (!(scriptType.prototype instanceof ScriptType) && !ownScriptName) {
+                Debug.warnOnce(`The Script class "${inferredScriptName}" must have a static "scriptName" property: \`${inferredScriptName}.scriptName = "${toLowerCamelCase(inferredScriptName)}";\`. This will be an error in future versions of PlayCanvas.`);
             }
 
-            scriptType.__name ??= scriptType.scriptName ?? lowerInferredScriptName;
+            // assign an own `__name` so this class is never confused with a base class's name
+            if (!Object.prototype.hasOwnProperty.call(scriptType, '__name')) {
+                scriptType.__name = getScriptRegistryName(scriptType);
+            }
             scriptName = scriptType.__name;
+
+            // bail out rather than index the script under an `undefined`/empty name (which would
+            // attach it as `this.undefined` and could mask other scripts)
+            if (!scriptName) {
+                Debug.error(`The script class could not be added to entity '${this.entity.name}' because its name could not be resolved. Add a static "scriptName" property to the class.`);
+                return null;
+            }
         }
 
         if (scriptType) {

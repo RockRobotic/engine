@@ -1,8 +1,8 @@
-import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { translateLcc2ToOctreeData } from '../../../src/framework/parsers/lcc2.js';
 

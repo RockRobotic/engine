@@ -1,9 +1,22 @@
-// @config HIDDEN
-// @config DESCRIPTION Demonstrates shadow catching with Gaussian Splats.
-import { deviceType, rootPath, fileImport } from 'examples/utils';
-import * as pc from 'playcanvas';
+// @config
+//
+// Demonstrates shadow catching with Gaussian Splats.
+//
+// @flag HIDDEN
+//
+// @credit
+// title: St Peter's Square Night
+// author: Poly Haven
+// source: https://polyhaven.com/a/st_peters_square_night
+// license: CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
 
-const { ShadowCatcher } = await fileImport(`${rootPath}/static/scripts/esm/shadow-catcher.mjs`);
+import * as pc from 'playcanvas';
+import { ShadowCatcher } from 'playcanvas/scripts/esm/shadow-catcher.mjs';
+
+import { data, deviceType } from 'examples/context';
+
+import shaderGlslVert from './shader.glsl.vert';
+import shaderWgslVert from './shader.wgsl.vert';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -47,14 +60,14 @@ app.on('destroy', () => {
 });
 
 const assets = {
-    biker: new pc.Asset('gsplat', 'gsplat', { url: `${rootPath}/static/assets/splats/biker.compressed.ply` }),
+    biker: new pc.Asset('gsplat', 'gsplat', { url: './assets/splats/biker.compressed.ply' }),
     hdri: new pc.Asset(
         'hdri',
         'texture',
-        { url: `${rootPath}/static/assets/hdri/st-peters-square.hdr` },
+        { url: './assets/hdri/st-peters-square.hdr' },
         { mipmaps: false }
     ),
-    orbit: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` })
+    orbit: new pc.Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' })
 };
 
 const assetListLoader = new pc.AssetListLoader(Object.values(assets), app.assets);
@@ -81,17 +94,43 @@ assetListLoader.load(() => {
     app.scene.sky.node.setLocalPosition(pc.Vec3.ZERO);
     app.scene.sky.center = new pc.Vec3(0, 0.05, 0);
 
-    // Customize GSplat material using unified mode material customization
-    // This sets the alpha clip value for all GSplat instances in unified mode
-    app.scene.gsplat.material.setParameter('alphaClip', 0.4);
-    app.scene.gsplat.material.update();
+    data.on('renderer:set', () => {
+        app.scene.gsplat.renderer = data.get('renderer');
+        const current = app.scene.gsplat.currentRenderer;
+        if (current !== data.get('renderer')) {
+            setTimeout(() => data.set('renderer', current), 0);
+        }
+    });
+    data.set('renderer', pc.GSPLAT_RENDERER_AUTO);
+
+    data.on('alphaClip:set', () => {
+        app.scene.gsplat.alphaClip = data.get('alphaClip');
+    });
+    data.set('alphaClip', 0.4);
+
+    // Optional custom vertex shader that animates each splat's position (via modifySplatCenter). The
+    // toggle verifies the cast shadow follows the animated position, since the shadow draw uses the
+    // same quad vertex shader as the forward pass.
+    const sceneMat = app.scene.gsplat.material;
+    const applyCustomShader = (enabled) => {
+        if (enabled) {
+            sceneMat.getShaderChunks('glsl').set('gsplatModifyVS', shaderGlslVert);
+            sceneMat.getShaderChunks('wgsl').set('gsplatModifyVS', shaderWgslVert);
+        } else {
+            sceneMat.getShaderChunks('glsl').delete('gsplatModifyVS');
+            sceneMat.getShaderChunks('wgsl').delete('gsplatModifyVS');
+        }
+        sceneMat.update();
+    };
+    data.on('shader:set', () => applyCustomShader(!!data.get('shader')));
+    applyCustomShader(false);
+    data.set('shader', false);
 
     // Create first splat entity
     const biker = new pc.Entity('biker');
     biker.addComponent('gsplat', {
         asset: assets.biker,
-        castShadows: true,
-        unified: true
+        castShadows: true
     });
     biker.setLocalPosition(-1.5, 0.05, 0);
     biker.setLocalEulerAngles(180, 90, 0);
@@ -102,8 +141,7 @@ assetListLoader.load(() => {
     const biker2 = new pc.Entity('biker2');
     biker2.addComponent('gsplat', {
         asset: assets.biker,
-        castShadows: true,
-        unified: true
+        castShadows: true
     });
     biker2.setLocalPosition(0.5, 0.05, 0);
     biker2.setLocalEulerAngles(180, 0, 0);
@@ -142,29 +180,56 @@ assetListLoader.load(() => {
     }
     app.root.addChild(shadowCatcher);
 
-    // Shadow casting directional light casting shadows
-    const directionalLight = new pc.Entity('light');
-    directionalLight.addComponent('light', {
-        type: 'directional',
-        color: pc.Color.WHITE,
-        castShadows: true,
-        intensity: 1,
-        shadowBias: 0.1,
-        normalOffsetBias: 0.05,
-        shadowDistance: 20,
-        shadowIntensity: 0.5,
-        shadowResolution: 2048,
-        shadowType: pc.SHADOW_PCF5_16F
+    // Create up to 6 shadow-casting directional lights; the 'Lights' slider enables the first N of
+    // them. Each light keeps a fixed base azimuth (so adding or removing one never moves the
+    // others) and they all rotate together in the same direction. The azimuths are ordered so the
+    // enabled set stays well-distributed: light 1 is opposite light 0, and at the full count of 6
+    // they are evenly spaced 60° apart ({30,90,150,210,270,330}). Intermediate odd counts are
+    // intentionally not symmetrical.
+    const lightBaseAzimuths = [30, 210, 90, 270, 150, 330];
+    const lights = lightBaseAzimuths.map((azimuth, i) => {
+        const light = new pc.Entity(`light${i}`);
+        light.addComponent('light', {
+            type: 'directional',
+            color: pc.Color.WHITE,
+            castShadows: true,
+            intensity: 1,
+            shadowBias: 0.1,
+            normalOffsetBias: 0.05,
+            shadowDistance: 20,
+            shadowIntensity: 0.5,
+            shadowResolution: 2048,
+            shadowType: pc.SHADOW_PCF5_16F
+        });
+        light.setEulerAngles(55, azimuth, 0);
+        app.root.addChild(light);
+        return light;
     });
-    directionalLight.setEulerAngles(55, 30, 0);
-    app.root.addChild(directionalLight);
 
-    // Auto-rotate light
+    // Number of active lights (0..6). Enables the first N; the rest are disabled.
+    data.on('numLights:set', () => {
+        const count = data.get('numLights');
+        lights.forEach((light, i) => {
+            light.enabled = i < count;
+        });
+    });
+    data.set('numLights', 2);
+
+    // Rotate all lights together (same direction), preserving each light's fixed azimuth offset;
+    // also advance the custom-shader animation time.
     let lightAngle = 0;
+    let currentTime = 0;
     app.on('update', (/** @type {number} */ dt) => {
         lightAngle += dt * 20;
-        directionalLight.setEulerAngles(55, 90 + lightAngle, 0);
+        lights.forEach((light, i) => {
+            light.setEulerAngles(55, lightBaseAzimuths[i] + lightAngle, 0);
+        });
+
+        currentTime += dt;
+        sceneMat.setParameter('uTime', currentTime);
+
+        // re-dirty the scene gsplat material each frame so the per-frame uTime propagates to the
+        // renderer's material copy (the quad renderer only re-copies template params when dirty)
+        sceneMat.update();
     });
 });
-
-export { app };

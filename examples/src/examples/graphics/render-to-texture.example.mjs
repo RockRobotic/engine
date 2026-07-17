@@ -1,5 +1,6 @@
-import { deviceType, rootPath } from 'examples/utils';
 import * as pc from 'playcanvas';
+
+import { deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
@@ -17,15 +18,24 @@ const assets = {
     helipad: new pc.Asset(
         'helipad-env-atlas',
         'texture',
-        { url: `${rootPath}/static/assets/cubemaps/helipad-env-atlas.png` },
+        { url: './assets/cubemaps/helipad-env-atlas.png' },
         { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
     ),
-    checkerboard: new pc.Asset('checkerboard', 'texture', { url: `${rootPath}/static/assets/textures/checkboard.png` }),
-    script: new pc.Asset('script', 'script', { url: `${rootPath}/static/scripts/camera/orbit-camera.js` })
+    checkerboard: new pc.Asset('checkerboard', 'texture', { url: './assets/textures/checkboard.png' }),
+    script: new pc.Asset('script', 'script', { url: './scripts/camera/orbit-camera.js' })
 };
 
 const gfxOptions = {
-    deviceTypes: [deviceType]
+    deviceTypes: [deviceType],
+
+    // Request the main back-buffer's MSAA color and depth attachments to be allocated as transient
+    // ("memoryless") attachments. On tile-based GPUs (mobile / Apple Silicon) this lets the driver
+    // keep their contents in fast on-chip memory and skip VRAM allocation entirely. This is valid
+    // here because the back-buffer is cleared each frame and never read back: there is no scene
+    // color grab (sceneColorMap) and no scene depth grab (sceneDepthMap) / depth prepass. These are
+    // WebGPU-only hints and are silently ignored on WebGL2 or where the feature is unsupported.
+    transientColor: true,
+    transientDepth: true
 };
 
 const device = await pc.createGraphicsDevice(canvas, gfxOptions);
@@ -150,7 +160,17 @@ assetListLoader.load(() => {
         colorBuffer: texture,
         depth: true,
         flipY: !app.graphicsDevice.isWebGPU,
-        samples: 2
+        samples: 2,
+
+        // Allocate this render target's MSAA color and depth attachments as transient
+        // ("memoryless") attachments (WebGPU only; ignored elsewhere). The multi-sampled color
+        // buffer is only ever resolved into the single-sampled `texture` we sample below - the MSAA
+        // buffer itself is never sampled, stored or reloaded - and the depth buffer is used only for
+        // in-pass depth testing and is never grabbed or resolved. Both therefore only need their
+        // contents within the render pass, so tile-based GPUs can keep them on-chip. Note that
+        // transientColor requires MSAA (samples > 1); it is a no-op for single-sampled color.
+        transientColor: true,
+        transientDepth: true
     });
 
     // create a layer for object that do not render into texture, add it right after the world layer
@@ -281,5 +301,3 @@ assetListLoader.load(() => {
         app.drawTexture(0.7, -0.7, 0.5, 0.5, texture, null, excludedLayer);
     });
 });
-
-export { app };

@@ -3,6 +3,7 @@ import { BoundingBox } from '../core/shape/bounding-box.js';
 import { BoundingSphere } from '../core/shape/bounding-sphere.js';
 import { BindGroup } from '../platform/graphics/bind-group.js';
 import { UniformBuffer } from '../platform/graphics/uniform-buffer.js';
+import { VertexBuffer } from '../platform/graphics/vertex-buffer.js';
 import { DrawCommands } from '../platform/graphics/draw-commands.js';
 import { indexFormatByteSize } from '../platform/graphics/constants.js';
 import {
@@ -39,7 +40,6 @@ import { PickerId } from './picker-id.js';
  * @import { Texture } from '../platform/graphics/texture.js'
  * @import { UniformBufferFormat } from '../platform/graphics/uniform-buffer-format.js'
  * @import { Vec3 } from '../core/math/vec3.js'
- * @import { VertexBuffer } from '../platform/graphics/vertex-buffer.js'
  * @import { CameraComponent } from '../framework/components/camera/component.js';
  */
 
@@ -64,8 +64,6 @@ class InstancingData {
 
     /**
      * True if the vertex buffer is destroyed when the mesh instance is destroyed.
-     *
-     * @type {boolean}
      */
     _destroyVertexBuffer = false;
 
@@ -177,7 +175,8 @@ class ShaderInstance {
  * @param {MeshInstance} meshInstance - The mesh instance.
  * @param {Vec3} cameraPosition - The position of the camera.
  * @param {Vec3} cameraForward - The forward vector of the camera.
- * @returns {void}
+ * @returns {number} The sort distance for the mesh instance. Mesh instances are sorted by this
+ * value in ascending or descending order depending on the layer's sort mode.
  */
 
 /**
@@ -245,8 +244,6 @@ class MeshInstance {
      * casting without overhead of removing from scene. Note that this property does not add the
      * mesh instance to appropriate list of shadow casters on a {@link Layer}, but allows mesh to
      * be skipped from shadow casting while it is in the list already. Defaults to false.
-     *
-     * @type {boolean}
      */
     castShadow = false;
 
@@ -263,8 +260,6 @@ class MeshInstance {
     /**
      * Controls whether the mesh instance can be culled by frustum culling (see
      * {@link CameraComponent#frustumCulling}). Defaults to true.
-     *
-     * @type {boolean}
      */
     cull = true;
 
@@ -272,15 +267,10 @@ class MeshInstance {
      * Determines the rendering order of mesh instances. Only used when mesh instances are added to
      * a {@link Layer} with {@link Layer#opaqueSortMode} or {@link Layer#transparentSortMode}
      * (depending on the material) set to {@link SORTMODE_MANUAL}.
-     *
-     * @type {number}
      */
     drawOrder = 0;
 
-    /**
-     * @type {number}
-     * @ignore
-     */
+    /** @ignore */
     _drawBucket = 127;
 
     /**
@@ -294,23 +284,48 @@ class MeshInstance {
      * Enable rendering for this mesh instance. Use visible property to enable/disable rendering
      * without overhead of removing from scene. But note that the mesh instance is still in the
      * hierarchy and still in the draw call list.
-     *
-     * @type {boolean}
      */
     visible = true;
 
     /**
-     * Read this value in {@link Scene.EVENT_POSTCULL} event to determine if the object is actually going
-     * to be rendered.
+     * A bitmask controlling which shader passes this mesh instance is rendered in. Bit N
+     * corresponds to the shader pass with index N: the built-in forward pass is
+     * {@link SHADER_FORWARD}, and indices for custom shader passes are obtained from
+     * {@link CameraComponent#setShaderPass}. Defaults to `0xFFFFFFFF` (all passes). For example,
+     * clearing the forward pass bit keeps the mesh in the other passes (such as the camera depth
+     * prepass that feeds Depth of Field) while making it invisible in the rendered color image.
      *
-     * @type {boolean}
+     * @type {number}
+     * @example
+     * // clear the forward (color) pass bit, leaving all other pass bits set: the mesh is no longer
+     * // drawn in the color image, but still takes part in the other passes (such as the prepass)
+     * meshInstance.shaderPassMask &= ~(1 << pc.SHADER_FORWARD);
+     * @example
+     * // set the forward (color) pass bit, leaving all other pass bits unchanged
+     * meshInstance.shaderPassMask |= (1 << pc.SHADER_FORWARD);
+     * @example
+     * // exclude the mesh from a custom shader pass set up on the camera (see
+     * // CameraComponent#setShaderPass), leaving all other pass bits set
+     * const customPass = cameraComponent.setShaderPass('custom_rendering');
+     * meshInstance.shaderPassMask &= ~(1 << customPass);
+     * @example
+     * // test whether the forward (color) pass bit is set
+     * const forwardBitSet = (meshInstance.shaderPassMask & (1 << pc.SHADER_FORWARD)) !== 0;
+     * @example
+     * // set every pass bit (the default value)
+     * meshInstance.shaderPassMask = 0xFFFFFFFF;
+     */
+    shaderPassMask = 0xFFFFFFFF;
+
+    /**
+     * Read this value in the {@link Scene.EVENT_POSTCULL} event to determine if the object is
+     * actually going to be rendered.
      */
     visibleThisFrame = false;
 
     /**
      * Negative scale batching support.
      *
-     * @type {number}
      * @ignore
      */
     flipFacesFactor = 1;
@@ -370,7 +385,6 @@ class MeshInstance {
     /**
      * True if the mesh instance is pickable by the {@link Picker}. Defaults to true.
      *
-     * @type {boolean}
      * @ignore
      */
     pick = true;
@@ -1129,20 +1143,27 @@ class MeshInstance {
      * Note that {@link instancingCount} is automatically set to the number of vertices of the
      * vertex buffer when it is provided.
      *
-     * @param {VertexBuffer|null} vertexBuffer - Vertex buffer to hold per-instance vertex data
-     * (usually world matrices). Pass null to turn off hardware instancing.
+     * @param {VertexBuffer|true|null} vertexBuffer - Vertex buffer to hold per-instance vertex data
+     * (usually world matrices). Pass `true` to enable attributeless instancing where the instance
+     * index is derived from `gl_InstanceID` / `instance_index` builtins rather than a vertex
+     * buffer attribute — the caller must set {@link instancingCount} manually. Pass null to turn
+     * off hardware instancing.
      * @param {boolean} cull - Whether to perform frustum culling on this instance. If true, the whole
-     * instance will be culled by the  camera frustum. This often involves setting
+     * instance will be culled by the camera frustum. This often involves setting
      * {@link RenderComponent#customAabb} containing all instances. Defaults to false, which means
      * the whole instance is always rendered.
      */
     setInstancing(vertexBuffer, cull = false) {
         if (vertexBuffer) {
-            this.instancingData = new InstancingData(vertexBuffer.numVertices);
-            this.instancingData.vertexBuffer = vertexBuffer;
+            if (vertexBuffer === true) {
+                this.instancingData = new InstancingData(0);
+            } else {
+                this.instancingData = new InstancingData(vertexBuffer.numVertices);
+                this.instancingData.vertexBuffer = vertexBuffer;
 
-            // mark vertex buffer as instancing data
-            vertexBuffer.format.instancing = true;
+                // mark vertex buffer as instancing data
+                vertexBuffer.format.instancing = true;
+            }
 
             // set up culling
             this.cull = cull;
@@ -1151,7 +1172,9 @@ class MeshInstance {
             this.cull = true;
         }
 
-        this._updateShaderDefs(vertexBuffer ? (this._shaderDefs | SHADERDEF_INSTANCING) : (this._shaderDefs & ~SHADERDEF_INSTANCING));
+        this._updateShaderDefs(vertexBuffer instanceof VertexBuffer ?
+            (this._shaderDefs | SHADERDEF_INSTANCING) :
+            (this._shaderDefs & ~SHADERDEF_INSTANCING));
     }
 
     /**
@@ -1294,7 +1317,8 @@ class MeshInstance {
      * Retrieves the specified shader parameter from a mesh instance.
      *
      * @param {string} name - The name of the parameter to query.
-     * @returns {object} The named parameter.
+     * @returns {object|undefined} The named parameter, or `undefined` if no parameter with that
+     * name is set on this mesh instance.
      */
     getParameter(name) {
         return this.parameters[name];

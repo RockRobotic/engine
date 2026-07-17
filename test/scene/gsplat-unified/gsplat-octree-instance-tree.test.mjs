@@ -1,5 +1,6 @@
-import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { test } from 'node:test';
+
 import { GSplatOctree } from '../../../src/scene/gsplat-unified/gsplat-octree.js';
 
 function makeTree() {

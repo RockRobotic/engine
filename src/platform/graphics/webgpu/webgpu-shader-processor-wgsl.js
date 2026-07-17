@@ -1,7 +1,7 @@
 import { Debug } from '../../../core/debug.js';
 import {
     BINDGROUP_MESH, semanticToLocation,
-    SHADERSTAGE_VERTEX, SHADERSTAGE_FRAGMENT,
+    SHADERSTAGE_VERTEX, SHADERSTAGE_FRAGMENT, SHADERSTAGE_COMPUTE,
     SAMPLETYPE_FLOAT,
     TEXTUREDIMENSION_2D, TEXTUREDIMENSION_2D_ARRAY, TEXTUREDIMENSION_CUBE, TEXTUREDIMENSION_3D,
     TEXTUREDIMENSION_1D, TEXTUREDIMENSION_CUBE_ARRAY,
@@ -15,7 +15,8 @@ import {
     TYPE_FLOAT32, TYPE_FLOAT16, TYPE_INT8, TYPE_INT16, TYPE_INT32
 } from '../constants.js';
 import { UniformFormat, UniformBufferFormat } from '../uniform-buffer-format.js';
-import { BindGroupFormat, BindStorageBufferFormat, BindTextureFormat } from '../bind-group-format.js';
+import { BindGroupFormat, BindStorageBufferFormat, BindStorageTextureFormat, BindTextureFormat, BindUniformBufferFormat } from '../bind-group-format.js';
+import { gpuTextureFormats } from './constants.js';
 
 /**
  * @import { GraphicsDevice } from '../graphics-device.js'
@@ -45,6 +46,53 @@ const MARKER = '@@@';
 
 // matches vertex of fragment entry function, extracts the input name. Ends at the start of the function body '{'.
 const ENTRY_FUNCTION = /(@vertex|@fragment)\s*fn\s+\w+\s*\(\s*(\w+)\s*:[\s\S]*?\{/;
+
+// Tables describing optional WGSL built-in inputs that the engine emits on demand. Each entry
+// maps a public private global (pcXxx) and a struct field (`<input>.xxx`) to the underlying
+// `@builtin(...)` declaration. Detection is data-driven so adding a new built-in is a one-row
+// change.
+//
+// - `requiresFeature` (optional): name of a `device.<X>` boolean that must be true to emit it.
+// - `isFallback` (optional): used as a sentinel when no other built-in or user input is present,
+//   to guarantee the input struct is never empty (which is invalid WGSL).
+const FRAGMENT_BUILTINS = [
+    { wgslName: 'position', wgslType: 'vec4f', wgslBuiltin: 'position', pcName: 'pcPosition', isFallback: true },
+    { wgslName: 'frontFacing', wgslType: 'bool', wgslBuiltin: 'front_facing', pcName: 'pcFrontFacing' },
+    { wgslName: 'sampleIndex', wgslType: 'u32', wgslBuiltin: 'sample_index', pcName: 'pcSampleIndex' },
+    { wgslName: 'primitiveIndex', wgslType: 'u32', wgslBuiltin: 'primitive_index', pcName: 'pcPrimitiveIndex', requiresFeature: 'supportsPrimitiveIndex' }
+];
+
+const VERTEX_BUILTINS = [
+    { wgslName: 'vertexIndex', wgslType: 'u32', wgslBuiltin: 'vertex_index', pcName: 'pcVertexIndex', isFallback: true },
+    { wgslName: 'instanceIndex', wgslType: 'u32', wgslBuiltin: 'instance_index', pcName: 'pcInstanceIndex' }
+];
+
+// Returns the subset of `builtins` whose pcName or `<entryInputName>.wgslName` appears in `source`
+// as a whole word, skipping any whose required device feature is not supported. Word boundaries
+// prevent false positives on identifiers that contain these names as a substring. Comments are
+// stripped by the preprocessor before this runs, so they don't need to be considered.
+const detectUsedBuiltins = (builtins, source, entryInputName, device) => {
+    return builtins.filter((b) => {
+        if (b.requiresFeature && !device[b.requiresFeature]) return false;
+        return new RegExp(`\\b(?:${b.pcName}|${entryInputName}\\.${b.wgslName})\\b`).test(source);
+    });
+};
+
+// Guarantees the input struct is never empty (which is invalid WGSL): if no built-ins were
+// detected and the rest of the struct (varyings / attributes) is also empty, fall back to the
+// stage's designated sentinel built-in.
+const ensureNonEmptyStruct = (used, builtins, device, otherFieldsPresent) => {
+    if (used.length === 0 && !otherFieldsPresent) {
+        const fallback = builtins.find(b => b.isFallback && (!b.requiresFeature || device[b.requiresFeature]));
+        if (fallback) return [fallback];
+    }
+    return used;
+};
+
+// Codegen helpers for a list of detected built-ins.
+const renderBuiltinStructFields = used => used.map(b => `    @builtin(${b.wgslBuiltin}) ${b.wgslName} : ${b.wgslType},\n`).join('');
+const renderBuiltinPrivates = used => used.map(b => `    var<private> ${b.pcName}: ${b.wgslType};\n`).join('');
+const renderBuiltinCopies = used => used.map(b => `    ${b.pcName} = input.${b.wgslName};\n`).join('');
 
 const textureBaseInfo = {
     'texture_1d': { viewDimension: TEXTUREDIMENSION_1D, baseSampleType: SAMPLETYPE_FLOAT },
@@ -126,6 +174,19 @@ const getTextureDeclarationType = (viewDimension, sampleType) => {
     return `${baseTypeString}<${coreFormatString}>`;
 };
 
+// reverse of gpuTextureFormats: WGSL/GPU storage format string -> PIXELFORMAT. Built once, used to
+// reflect storage texture declarations. Several PIXELFORMATs can map to the same string (e.g. RGB8
+// and RGBA8 both -> 'rgba8unorm'); last-wins so the canonical/most-common format wins (RGBA8 over
+// RGB8 with the current table). This matches what callers pass to a hand-authored
+// BindStorageTextureFormat, avoiding a needless split of the bind group layout / pipeline cache
+// (whose key uses the numeric PIXELFORMAT, even though the GPUTextureFormat string is identical).
+const gpuFormatToPixelFormat = new Map();
+gpuTextureFormats.forEach((str, pixelFormat) => {
+    if (str) {
+        gpuFormatToPixelFormat.set(str, pixelFormat);
+    }
+});
+
 const wrappedArrayTypes = {
     'f32': 'WrappedF32',
     'i32': 'WrappedI32',
@@ -205,8 +266,9 @@ class UniformLine {
 const TEXTURE_REGEX = /^\s*var\s+(\w+)\s*:\s*(texture_\w+)(?:<(\w+)>)?;\s*$/;
 // eslint-disable-next-line
 const STORAGE_TEXTURE_REGEX = /^\s*var\s+([\w\d_]+)\s*:\s*(texture_storage_2d|texture_storage_2d_array)<([\w\d_]+),\s*(\w+)>\s*;\s*$/;
+// storage buffers only support 'read' and 'read_write' access in WGSL (no write-only form)
 // eslint-disable-next-line
-const STORAGE_BUFFER_REGEX = /^\s*var\s*<storage,\s*(read|write)?>\s*([\w\d_]+)\s*:\s*(.*)\s*;\s*$/;
+const STORAGE_BUFFER_REGEX = /^\s*var\s*<storage,\s*(read_write|read)?>\s*([\w\d_]+)\s*:\s*(.*)\s*;\s*$/;
 // eslint-disable-next-line
 const EXTERNAL_TEXTURE_REGEX = /^\s*var\s+([\w\d_]+)\s*:\s*texture_external;\s*$/;
 // eslint-disable-next-line
@@ -330,15 +392,22 @@ class WebgpuShaderProcessorWGSL {
         const vertexExtracted = WebgpuShaderProcessorWGSL.extract(shaderDefinition.vshader);
         const fragmentExtracted = WebgpuShaderProcessorWGSL.extract(shaderDefinition.fshader);
 
+        // extract the user's input parameter name from each entry function for built-in detection.
+        // Note: only the parameter name is captured here, not the brace position - `renameUniformAccess`
+        // below modifies the source and invalidates any cached match positions, so `copyInputs` re-runs
+        // the regex against the post-rename source to find its injection point.
+        const vertexInputName = vertexExtracted.src.match(ENTRY_FUNCTION)?.[2] ?? '';
+        const fragmentInputName = fragmentExtracted.src.match(ENTRY_FUNCTION)?.[2] ?? '';
+
         // VS - convert a list of attributes to a shader block with fixed locations
         const attributesMap = new Map();
-        const attributesBlock = WebgpuShaderProcessorWGSL.processAttributes(vertexExtracted.attributes, shaderDefinition.attributes, attributesMap, shaderDefinition.processingOptions, shader);
+        const attributesBlock = WebgpuShaderProcessorWGSL.processAttributes(vertexExtracted.attributes, shaderDefinition.attributes, attributesMap, shaderDefinition.processingOptions, shader, device, vertexExtracted.src, vertexInputName);
 
         // VS - convert a list of varyings to a shader block
         const vertexVaryingsBlock = WebgpuShaderProcessorWGSL.processVaryings(vertexExtracted.varyings, varyingMap, true, device);
 
         // FS - convert a list of varyings to a shader block
-        const fragmentVaryingsBlock = WebgpuShaderProcessorWGSL.processVaryings(fragmentExtracted.varyings, varyingMap, false, device);
+        const fragmentVaryingsBlock = WebgpuShaderProcessorWGSL.processVaryings(fragmentExtracted.varyings, varyingMap, false, device, fragmentExtracted.src, fragmentInputName);
 
         // uniforms - merge vertex and fragment uniforms, and create shared uniform buffers
         // Note that as both vertex and fragment can declare the same uniform, we need to remove duplicates
@@ -388,6 +457,80 @@ class WebgpuShaderProcessorWGSL {
             attributes: attributesMap,
             meshUniformBufferFormat: uniformsData.meshUniformBufferFormat,
             meshBindGroupFormat: resourcesData.meshBindGroupFormat
+        };
+    }
+
+    /**
+     * Process a compute shader: reflect its simplified-syntax declarations (loose `uniform`s,
+     * textures/samplers, storage buffers, storage textures) into a single bind group at
+     * `reflectedGroupIndex`, leaving
+     * any explicitly-bound (`@group/@binding`) declarations untouched. The loose uniforms are
+     * collapsed into one generated uniform buffer (`ub_compute`) placed inside that same group.
+     *
+     * @param {GraphicsDevice} device - The graphics device.
+     * @param {string} source - The fully-preprocessed compute shader source (includes/defines resolved).
+     * @param {object} shaderDefinition - The shader definition.
+     * @param {Shader} shader - The shader.
+     * @param {number} reflectedGroupIndex - The bind group index the reflected resources are placed
+     * in (0 when no caller format is supplied, otherwise 1).
+     * @returns {object} - `{ cshader, computeBindGroupFormat, computeUniformBufferFormat }`. The
+     * formats are null when there is nothing to reflect (strictly additive - behavior is then
+     * identical to a fully hand-authored compute shader).
+     */
+    static runCompute(device, source, shaderDefinition, shader, reflectedGroupIndex) {
+
+        // pull simplified-syntax declarations out of the source (explicit @group/@binding lines,
+        // which start with '@' rather than 'var'/'uniform', are not matched and pass through)
+        const extracted = WebgpuShaderProcessorWGSL.extract(source);
+
+        // parse loose uniforms - all of them go into the single generated compute uniform buffer
+        const parsedUniforms = extracted.uniforms.map(line => new UniformLine(line, shader));
+        const meshUniforms = [];
+        parsedUniforms.forEach((uniform) => {
+            uniform.ubName = 'ub_compute';
+            const uniformType = uniformTypeToNameMapWGSL.get(uniform.type);
+            Debug.assert(uniformType !== undefined, `Uniform type ${uniform.type} is not recognised on line [${uniform.line}]`);
+            meshUniforms.push(new UniformFormat(uniform.name, uniformType, uniform.arraySize));
+        });
+        // do not synthesize a dummy uniform when empty - reflection must stay strictly additive
+        const computeUniformBufferFormat = meshUniforms.length > 0 ? new UniformBufferFormat(device, meshUniforms) : null;
+
+        // parse resource lines (no vertex/fragment merge for compute)
+        const parsedResources = WebgpuShaderProcessorWGSL.mergeResources(extracted.resources, [], shader);
+        const resourceFormats = WebgpuShaderProcessorWGSL.buildResourceFormats(parsedResources, SHADERSTAGE_COMPUTE, shader);
+
+        // the generated uniform buffer is a binding inside the same reflected group, appended last
+        const ubBindFormat = computeUniformBufferFormat ? new BindUniformBufferFormat('ub_compute', SHADERSTAGE_COMPUTE) : null;
+        const allFormats = ubBindFormat ? [...resourceFormats, ubBindFormat] : resourceFormats;
+
+        // when there is nothing to reflect, leave the source and bindings exactly as the caller
+        // provided them (strictly additive); otherwise build the single reflected bind group format
+        // (this assigns the slots), generate the declarations and inject them into the source
+        let cshader = source;
+        let computeBindGroupFormat = null;
+        if (allFormats.length > 0) {
+
+            computeBindGroupFormat = new BindGroupFormat(device, allFormats);
+
+            // generate declarations using the assigned slots
+            let code = WebgpuShaderProcessorWGSL.getTextureShaderDeclaration(computeBindGroupFormat, reflectedGroupIndex);
+            if (computeUniformBufferFormat) {
+                code += WebgpuShaderProcessorWGSL.getUniformShaderDeclaration(computeUniformBufferFormat, reflectedGroupIndex, ubBindFormat.slot, 'compute');
+            }
+
+            // rewrite `uniform.x` references to `ub_compute.x`
+            const src = WebgpuShaderProcessorWGSL.renameUniformAccess(extracted.src, parsedUniforms);
+
+            // insert the generated declarations at the marker (or prepend if there was no marker)
+            cshader = src.includes(MARKER) ? src.replace(MARKER, code) : `${code}\n${src}`;
+        }
+
+        // computeUniformBufferFormat is already null unless loose uniforms were reflected (in which
+        // case computeBindGroupFormat is non-null too), so the result stays consistent
+        return {
+            cshader,
+            computeBindGroupFormat,
+            computeUniformBufferFormat
         };
     }
 
@@ -558,10 +701,21 @@ class WebgpuShaderProcessorWGSL {
         return resources;
     }
 
-    static processResources(device, resources, processingOptions, shader) {
+    /**
+     * Converts parsed resource lines (textures, samplers, storage buffers, storage textures) into an
+     * array of bind formats. Shared by the vertex/fragment path ({@link processResources}) and the
+     * compute path ({@link runCompute}); only the shader-stage visibility differs.
+     *
+     * @param {Array<ResourceLine>} resources - The parsed resource lines.
+     * @param {number} visibility - Shader stage visibility bit-flags for the created formats.
+     * @param {Shader} shader - The shader (for error reporting).
+     * @returns {Array<BindTextureFormat|BindStorageBufferFormat|BindStorageTextureFormat>} - The bind
+     * formats, in declaration order (a texture with a sampler consumes the following sampler line).
+     * @private
+     */
+    static buildResourceFormats(resources, visibility, shader) {
 
-        // build mesh bind group format - this contains the textures, but not the uniform buffer as that is a separate binding
-        const textureFormats = [];
+        const formats = [];
         for (let i = 0; i < resources.length; i++) {
 
             const resource = resources[i];
@@ -577,7 +731,7 @@ class WebgpuShaderProcessorWGSL {
                 const dimension = resource.textureDimension;
 
                 // TODO: we could optimize visibility to only stages that use any of the data
-                textureFormats.push(new BindTextureFormat(resource.name, SHADERSTAGE_VERTEX | SHADERSTAGE_FRAGMENT, dimension, sampleType, hasSampler, hasSampler ? sampler.name : null));
+                formats.push(new BindTextureFormat(resource.name, visibility, dimension, sampleType, hasSampler, hasSampler ? sampler.name : null));
 
                 // following sampler was already handled
                 if (hasSampler) i++;
@@ -586,28 +740,47 @@ class WebgpuShaderProcessorWGSL {
             if (resource.isStorageBuffer) {
 
                 const readOnly = resource.accessMode !== 'read_write';
-                const bufferFormat = new BindStorageBufferFormat(resource.name, SHADERSTAGE_VERTEX | SHADERSTAGE_FRAGMENT, readOnly);
+                const bufferFormat = new BindStorageBufferFormat(resource.name, visibility, readOnly);
                 bufferFormat.format = resource.type;
-                textureFormats.push(bufferFormat);
+                formats.push(bufferFormat);
+            }
+
+            if (resource.isStorageTexture) {
+
+                // storage textures are compute-only (BindStorageTextureFormat hardcodes
+                // SHADERSTAGE_COMPUTE); the `visibility` param does not apply here
+                const dimension = resource.textureType === 'texture_storage_2d_array' ? TEXTUREDIMENSION_2D_ARRAY : TEXTUREDIMENSION_2D;
+                const pixelFormat = gpuFormatToPixelFormat.get(resource.format);
+                Debug.assert(pixelFormat !== undefined, `Unsupported storage texture format '${resource.format}' on line [${resource.originalLine}]`);
+                const write = resource.access === 'write' || resource.access === 'read_write';
+                const read = resource.access === 'read' || resource.access === 'read_write';
+                formats.push(new BindStorageTextureFormat(resource.name, pixelFormat, dimension, write, read));
             }
 
             Debug.assert(!resource.isSampler, `Sampler uniform needs to follow a texture uniform, but does not on line [${resource.originalLine}]`);
-            Debug.assert(!resource.isStorageTexture, 'TODO: add support for storage textures here');
             Debug.assert(!resource.externalTexture, 'TODO: add support for external textures here');
         }
+
+        return formats;
+    }
+
+    static processResources(device, resources, processingOptions, shader, visibility = SHADERSTAGE_VERTEX | SHADERSTAGE_FRAGMENT, bindGroupIndex = BINDGROUP_MESH) {
+
+        // build mesh bind group format - this contains the textures, but not the uniform buffer as that is a separate binding
+        const textureFormats = WebgpuShaderProcessorWGSL.buildResourceFormats(resources, visibility, shader);
 
         const meshBindGroupFormat = new BindGroupFormat(device, textureFormats);
 
         // generate code for textures
         let code = '';
-        processingOptions.bindGroupFormats.forEach((format, bindGroupIndex) => {
+        processingOptions?.bindGroupFormats?.forEach((format, index) => {
             if (format) {
-                code += WebgpuShaderProcessorWGSL.getTextureShaderDeclaration(format, bindGroupIndex);
+                code += WebgpuShaderProcessorWGSL.getTextureShaderDeclaration(format, index);
             }
         });
 
         // and also for generated mesh format
-        code += WebgpuShaderProcessorWGSL.getTextureShaderDeclaration(meshBindGroupFormat, BINDGROUP_MESH);
+        code += WebgpuShaderProcessorWGSL.getTextureShaderDeclaration(meshBindGroupFormat, bindGroupIndex);
 
         return {
             code,
@@ -625,12 +798,14 @@ class WebgpuShaderProcessorWGSL {
      * @param {UniformBufferFormat} ubFormat - Format of the uniform buffer.
      * @param {number} bindGroup - The bind group index.
      * @param {number} bindIndex - The bind index.
+     * @param {string} [name] - The name used for the struct and uniform buffer variable
+     * (`struct_ub_<name>` / `ub_<name>`). Defaults to the bind group name. The compute path passes
+     * an explicit name as its reflected group index does not map to a meaningful bindGroupNames entry.
      * @returns {string} - The shader code for the uniform buffer.
      * @private
      */
-    static getUniformShaderDeclaration(ubFormat, bindGroup, bindIndex) {
+    static getUniformShaderDeclaration(ubFormat, bindGroup, bindIndex, name = bindGroupNames[bindGroup]) {
 
-        const name = bindGroupNames[bindGroup];
         const structName = `struct_ub_${name}`;
         let code = `struct ${structName} {\n`;
 
@@ -695,16 +870,25 @@ class WebgpuShaderProcessorWGSL {
 
         });
 
-        Debug.assert(format.storageTextureFormats.length === 0, 'Implement support for storage textures here');
+        format.storageTextureFormats.forEach((format) => {
+
+            const storageType = format.textureDimension === TEXTUREDIMENSION_2D_ARRAY ? 'texture_storage_2d_array' : 'texture_storage_2d';
+            const fmtString = gpuTextureFormats[format.format];
+            const access = format.read ? (format.write ? 'read_write' : 'read') : 'write';
+            code += `@group(${bindGroup}) @binding(${format.slot}) var ${format.name}: ${storageType}<${fmtString}, ${access}>;\n`;
+
+        });
+
         // TODO: also add external texture support here
 
         return code;
     }
 
-    static processVaryings(varyingLines, varyingMap, isVertex, device) {
+    static processVaryings(varyingLines, varyingMap, isVertex, device, source = '', entryInputName = '') {
         let block = '';
         let blockPrivates = '';
         let blockCopy = '';
+
         varyingLines.forEach((line, index) => {
             const match = line.match(VARYING);
             Debug.assert(match, `Varying line is not valid: ${line}`);
@@ -736,50 +920,39 @@ class WebgpuShaderProcessorWGSL {
             }
         });
 
-        // add built-in varyings
+        // vertex output: @builtin(position) is required by WGSL, always emitted
         if (isVertex) {
-            block += '    @builtin(position) position : vec4f,\n';          // output position
-        } else {
-            block += '    @builtin(position) position : vec4f,\n';          // interpolated fragment position
-            block += '    @builtin(front_facing) frontFacing : bool,\n';    // front-facing
-            block += '    @builtin(sample_index) sampleIndex : u32,\n';     // sample index for MSAA
-            if (device.supportsPrimitiveIndex) {
-                block += '    @builtin(primitive_index) primitiveIndex : u32,\n';  // primitive index
-            }
+            block += '    @builtin(position) position : vec4f,\n';
+            return `
+                struct VertexOutput {
+                    ${block}
+                };
+            `;
         }
 
-        // primitive index support
-        const primitiveIndexGlobals = device.supportsPrimitiveIndex ? `
-            var<private> pcPrimitiveIndex: u32;
-        ` : '';
-        const primitiveIndexCopy = device.supportsPrimitiveIndex ? `
-                pcPrimitiveIndex = input.primitiveIndex;
-        ` : '';
+        // fragment input: data-driven detection of optional built-ins, with sentinel fallback
+        // to guarantee a non-empty FragmentInput struct (which is invalid WGSL).
+        const usedBuiltins = ensureNonEmptyStruct(
+            detectUsedBuiltins(FRAGMENT_BUILTINS, source, entryInputName, device),
+            FRAGMENT_BUILTINS,
+            device,
+            block.length > 0
+        );
+        block += renderBuiltinStructFields(usedBuiltins);
 
-        // global variables for build-in input into fragment shader
-        const fragmentGlobals = isVertex ? '' : `
-            var<private> pcPosition: vec4f;
-            var<private> pcFrontFacing: bool;
-            var<private> pcSampleIndex: u32;
-            ${primitiveIndexGlobals}
+        return `
+            struct FragmentInput {
+                ${block}
+            };
+
+            ${renderBuiltinPrivates(usedBuiltins)}
             ${blockPrivates}
-            
+
             // function to copy inputs (varyings) to private global variables
             fn _pcCopyInputs(input: FragmentInput) {
                 ${blockCopy}
-                pcPosition = input.position;
-                pcFrontFacing = input.frontFacing;
-                pcSampleIndex = input.sampleIndex;
-                ${primitiveIndexCopy}
+                ${renderBuiltinCopies(usedBuiltins)}
             }
-        `;
-
-        const structName = isVertex ? 'VertexOutput' : 'FragmentInput';
-        return `
-            struct ${structName} {
-                ${block}
-            };
-            ${fragmentGlobals}
         `;
     }
 
@@ -828,7 +1001,7 @@ class WebgpuShaderProcessorWGSL {
         return floatToIntShort[shortType] || null;
     }
 
-    static processAttributes(attributeLines, shaderDefinitionAttributes = {}, attributesMap, processingOptions, shader) {
+    static processAttributes(attributeLines, shaderDefinitionAttributes = {}, attributesMap, processingOptions, shader, device, source = '', entryInputName = '') {
         let blockAttributes = '';
         let blockPrivates = '';
         let blockCopy = '';
@@ -879,35 +1052,42 @@ class WebgpuShaderProcessorWGSL {
             }
         });
 
+        // vertex input: data-driven detection of optional built-ins, with sentinel fallback
+        // to guarantee a non-empty VertexInput struct (which is invalid WGSL).
+        const usedBuiltins = ensureNonEmptyStruct(
+            detectUsedBuiltins(VERTEX_BUILTINS, source, entryInputName, device),
+            VERTEX_BUILTINS,
+            device,
+            blockAttributes.length > 0
+        );
+
         return `
             struct VertexInput {
                 ${blockAttributes}
-                @builtin(vertex_index) vertexIndex : u32,       // built-in vertex index
-                @builtin(instance_index) instanceIndex : u32    // built-in instance index
+                ${renderBuiltinStructFields(usedBuiltins)}
             };
 
             ${blockPrivates}
-            var<private> pcVertexIndex: u32;
-            var<private> pcInstanceIndex: u32;
+            ${renderBuiltinPrivates(usedBuiltins)}
 
             fn _pcCopyInputs(input: VertexInput) {
                 ${blockCopy}
-                pcVertexIndex = input.vertexIndex;
-                pcInstanceIndex = input.instanceIndex;
+                ${renderBuiltinCopies(usedBuiltins)}
             }
         `;
     }
 
     /**
      * Injects a call to _pcCopyInputs with the function's input parameter right after the opening
-     * brace of a WGSL function marked with `@vertex` or `@fragment`.
+     * brace of a WGSL function marked with `@vertex` or `@fragment`. The regex is run inside this
+     * function (not hoisted) so the brace position is always derived from the current `src` - any
+     * earlier source-modifying step (e.g. `renameUniformAccess`) would invalidate a cached position.
      *
      * @param {string} src - The source string containing the WGSL code.
      * @param {Shader} shader - The shader.
      * @returns {string} - The modified source string.
      */
     static copyInputs(src, shader) {
-        // find @vertex or @fragment followed by the function signature and capture the input parameter name
         const match = src.match(ENTRY_FUNCTION);
 
         // check if match exists AND the parameter name (Group 2) was captured

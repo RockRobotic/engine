@@ -1,5 +1,6 @@
-import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { test } from 'node:test';
+
 import { GSplatOctreeNode } from '../../../src/scene/gsplat-unified/gsplat-octree-node.js';
 
 test('GSplatOctreeNode exposes optional tree fields (default -1 / empty)', () => {

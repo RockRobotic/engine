@@ -15,6 +15,10 @@ export default /* glsl */`
     #include "floatAsUintPS"
 #endif
 
+#if !defined(SHADOW_PASS) && !defined(PICK_PASS) && !defined(PREPASS_PASS)
+    uniform float alphaClipForward;
+#endif
+
 varying mediump vec2 gaussianUV;
 varying mediump vec4 gaussianColor;
 
@@ -25,6 +29,11 @@ varying mediump vec4 gaussianColor;
 #ifdef PICK_PASS
     #include "pickPS"
 #endif
+
+#ifdef GSPLAT_USER_VARYINGS
+    #include "gsplatUserVaryingsPS"
+#endif
+#include "gsplatModifyPS"
 
 const float EXP4 = exp(-4.0);
 const float INV_EXP4 = 1.0 / (1.0 - EXP4);
@@ -62,14 +71,14 @@ void main(void) {
 
     #elif SHADOW_PASS
 
-        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        gl_FragColor = vec4(gl_FragCoord.z, 0.0, 0.0, 1.0);
 
     #elif PREPASS_PASS
 
         gl_FragColor = float2vec4(vLinearDepth);
 
     #else
-        if (alpha < 1.0 / 255.0) {
+        if (alpha < alphaClipForward) {
             discard;
         }
 
@@ -77,7 +86,9 @@ void main(void) {
             opacityDither(alpha, id * 0.013);
         #endif
 
-        gl_FragColor = vec4(gaussianColor.xyz * alpha, alpha);
+        vec4 fragColor = vec4(gaussianColor.xyz, alpha);
+        modifySplatColor(gaussianUV, fragColor);
+        gl_FragColor = vec4(fragColor.xyz * fragColor.a, fragColor.a);
     #endif
 }
 `;

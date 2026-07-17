@@ -7,11 +7,10 @@ import { Vec4 } from '../../core/math/vec4.js';
 import { Mat3 } from '../../core/math/mat3.js';
 import { Mat4 } from '../../core/math/mat4.js';
 import { BoundingSphere } from '../../core/shape/bounding-sphere.js';
-import { Frustum } from '../../core/shape/frustum.js';
 import {
     CLEARFLAG_COLOR, CLEARFLAG_DEPTH, CLEARFLAG_STENCIL,
     BINDGROUP_MESH, BINDGROUP_VIEW, UNIFORM_BUFFER_DEFAULT_SLOT_NAME,
-    UNIFORMTYPE_MAT4, UNIFORMTYPE_MAT3, UNIFORMTYPE_VEC4, UNIFORMTYPE_VEC3, UNIFORMTYPE_IVEC3, UNIFORMTYPE_VEC2, UNIFORMTYPE_FLOAT, UNIFORMTYPE_INT,
+    UNIFORMTYPE_MAT4, UNIFORMTYPE_MAT3, UNIFORMTYPE_VEC4, UNIFORMTYPE_VEC3, UNIFORMTYPE_IVEC3, UNIFORMTYPE_VEC2, UNIFORMTYPE_FLOAT, UNIFORMTYPE_INT, UNIFORMTYPE_UINT,
     SHADERSTAGE_VERTEX, SHADERSTAGE_FRAGMENT,
     CULLFACE_NONE,
     BINDGROUP_MESH_UB,
@@ -37,10 +36,10 @@ import { ShadowRendererLocal } from './shadow-renderer-local.js';
 import { ShadowRendererDirectional } from './shadow-renderer-directional.js';
 import { ShadowRenderer } from './shadow-renderer.js';
 import { WorldClustersAllocator } from './world-clusters-allocator.js';
-import { RenderPassUpdateClustered } from './render-pass-update-clustered.js';
+import { FramePassUpdateClustered } from './frame-pass-update-clustered.js';
+import { Camera } from '../camera.js';
 
 /**
- * @import { Camera } from '../camera.js'
  * @import { CulledInstances } from '../layer.js'
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
  * @import { LayerComposition } from '../composition/layer-composition.js'
@@ -57,19 +56,19 @@ const viewInvMat = new Mat4();
 const viewMat = new Mat4();
 const viewMat3 = new Mat3();
 const tempSphere = new BoundingSphere();
-const tempFrustum = new Frustum();
-const _flipYMat = new Mat4().setScale(1, -1, 1);
 const _tempLightSet = new Set();
 const _tempLayerSet = new Set();
 const _dynamicBindGroup = new DynamicBindGroup();
 
-// Converts a projection matrix in OpenGL style (depth range of -1..1) to a DirectX style (depth range of 0..1).
-const _fixProjRangeMat = new Mat4().set([
-    1, 0, 0, 0,
-    0, 1, 0, 0,
-    0, 0, 0.5, 0,
-    0, 0, 0.5, 1
-]);
+// Reusable scratch passed to GraphicsDevice.clear so the per-frame call site
+// does not allocate a fresh options object + color array.
+const _tempClearColor = [0, 0, 0, 1];
+const _tempClearOptions = {
+    color: _tempClearColor,
+    depth: 1,
+    stencil: 0,
+    flags: 0
+};
 
 // helton sequence of 2d offsets for jittering
 const _haltonSequence = [
@@ -93,8 +92,6 @@ const _haltonSequence = [
 
 const _tempProjMat0 = new Mat4();
 const _tempProjMat1 = new Mat4();
-const _tempProjMat2 = new Mat4();
-const _tempProjMat3 = new Mat4();
 const _tempProjMat4 = new Mat4();
 const _tempProjMat5 = new Mat4();
 const _tempSet = new Set();
@@ -193,7 +190,7 @@ class Renderer {
 
         // clustered passes
         if (this.scene.clusteredLightingEnabled) {
-            this._renderPassUpdateClustered = new RenderPassUpdateClustered(this.device, this, this.shadowRenderer,
+            this._renderPassUpdateClustered = new FramePassUpdateClustered(this.device, this, this.shadowRenderer,
                 this._shadowRendererLocal, this.lightTextureAtlas);
         }
 
@@ -316,16 +313,11 @@ class Renderer {
         const flipY = target?.flipY;
 
         let viewList = null;
-        if (camera.xr && camera.xr.session) {
-            const transform = camera._node?.parent?.getWorldTransform() || null;
-            const views = camera.xr.views;
-            viewList = views.list;
+        if (camera.xrActive) {
+            viewList = camera.xrViews;
 
-            // update transforms for all views
-            for (let v = 0; v < viewList.length; v++) {
-                const view = viewList[v];
-                view.updateTransforms(transform);
-            }
+            // refresh the derived per-view matrices for all views
+            camera.updateViewTransforms();
         } else {
 
             // Projection Matrix
@@ -335,17 +327,9 @@ class Renderer {
             }
             let projMatSkybox = camera.getProjectionMatrixSkybox();
 
-            // flip projection matrices
-            if (flipY) {
-                projMat = _tempProjMat0.mul2(_flipYMat, projMat);
-                projMatSkybox = _tempProjMat1.mul2(_flipYMat, projMatSkybox);
-            }
-
-            // update depth range of projection matrices (-1..1 to 0..1)
-            if (this.device.isWebGPU) {
-                projMat = _tempProjMat2.mul2(_fixProjRangeMat, projMat);
-                projMatSkybox = _tempProjMat3.mul2(_fixProjRangeMat, projMatSkybox);
-            }
+            const webgpu = this.device.isWebGPU;
+            projMat = Camera.applyShaderProjectionTransform(projMat, _tempProjMat0, flipY, webgpu);
+            projMatSkybox = Camera.applyShaderProjectionTransform(projMatSkybox, _tempProjMat1, flipY, webgpu);
 
             // camera jitter
             const { jitter } = camera;
@@ -427,16 +411,14 @@ class Renderer {
         // camera params
         this.cameraParamsId.setValue(camera.fillShaderParams(this.cameraParams));
 
-        // viewport size
-        let viewportWidth = target ? target.width : this.device.width;
-        let viewportHeight = target ? target.height : this.device.height;
+        // viewport size. In stereo XR the XR session reports the per-eye viewport directly,
+        // which is correct for both side-by-side single-texture and multi-pass per-eye-view
+        // layouts — preferred over inferring from target.width.
+        const xrView = camera.xrActive ? (camera.xrViews[0] ?? null) : null;
+        let viewportWidth = xrView ? xrView.viewport.z : (target ? target.width : this.device.width);
+        let viewportHeight = xrView ? xrView.viewport.w : (target ? target.height : this.device.height);
         viewportWidth *= camera.rect.z;
         viewportHeight *= camera.rect.w;
-
-        // adjust viewport for stereoscopic VR sessions
-        if (camera.xr?.active && camera.xr.views.list.length === 2) {
-            viewportWidth *= 0.5;
-        }
 
         this.viewportSize[0] = viewportWidth;
         this.viewportSize[1] = viewportHeight;
@@ -471,12 +453,15 @@ class Renderer {
             const device = this.device;
             DebugGraphics.pushGpuMarker(device, 'CLEAR');
 
-            device.clear({
-                color: [camera._clearColor.r, camera._clearColor.g, camera._clearColor.b, camera._clearColor.a],
-                depth: camera._clearDepth,
-                stencil: camera._clearStencil,
-                flags: flags
-            });
+            const c = camera._clearColor;
+            _tempClearColor[0] = c.r;
+            _tempClearColor[1] = c.g;
+            _tempClearColor[2] = c.b;
+            _tempClearColor[3] = c.a;
+            _tempClearOptions.depth = camera._clearDepth;
+            _tempClearOptions.stencil = camera._clearStencil;
+            _tempClearOptions.flags = flags;
+            device.clear(_tempClearOptions);
 
             DebugGraphics.popGpuMarker(device);
         }
@@ -502,24 +487,8 @@ class Renderer {
 
     updateCameraFrustum(camera) {
 
-        if (camera.xr && camera.xr.views.list.length) {
-            // Calculate combined frustum from all XR views to avoid culling objects
-            // visible in any view (e.g. right edge of right eye in stereo rendering).
-            // This works because WebXR uses parallel projection for stereo views - both eyes
-            // look in the same direction with only a horizontal offset, so frustum plane
-            // normals are identical and we can merge by selecting outermost planes.
-            const views = camera.xr.views.list;
-
-            // first view establishes the base frustum
-            viewProjMat.mul2(views[0].projMat, views[0].viewOffMat);
-            camera.frustum.setFromMat4(viewProjMat);
-
-            // for additional views, expand frustum to encompass all views
-            for (let v = 1; v < views.length; v++) {
-                viewProjMat.mul2(views[v].projMat, views[v].viewOffMat);
-                tempFrustum.setFromMat4(viewProjMat);
-                camera.frustum.add(tempFrustum);
-            }
+        // XR: combined frustum from all views (avoids culling objects visible in only one eye)
+        if (camera.updateXrFrustum()) {
             return;
         }
 
@@ -718,7 +687,7 @@ class Renderer {
                 new UniformFormat('skyboxIntensity', UNIFORMTYPE_FLOAT),
                 new UniformFormat('exposure', UNIFORMTYPE_FLOAT),
                 new UniformFormat('textureBias', UNIFORMTYPE_FLOAT),
-                new UniformFormat('view_index', UNIFORMTYPE_FLOAT)
+                new UniformFormat('view_index', UNIFORMTYPE_UINT)
             ];
 
             if (isClustered) {
@@ -1093,13 +1062,14 @@ class Renderer {
         for (let i = 0; i < numCameras; i++) {
             const camera = comp.cameras[i];
 
-            // event before the camera is culling
-            scene?.fire(EVENT_PRECULL, camera);
-
             // update camera and frustum
             const renderTarget = camera.renderTarget;
             camera.frameUpdate(renderTarget);
             this.updateCameraFrustum(camera.camera);
+
+            // event before the camera is culling, fired after the frustum has been updated so
+            // listeners can rely on the current camera state
+            scene?.fire(EVENT_PRECULL, camera);
 
             // for all of its enabled layers
             const layerIds = camera.layers;

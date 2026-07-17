@@ -1,5 +1,6 @@
-import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
+import { test } from 'node:test';
+
 import { GSplatHandler } from '../../../src/framework/handlers/gsplat.js';
 import { Lcc2Parser } from '../../../src/framework/parsers/lcc2.js';
 
