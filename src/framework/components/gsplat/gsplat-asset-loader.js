@@ -34,9 +34,14 @@ class GSplatAssetLoader extends GSplatAssetLoaderBase {
     /**
      * Maximum number of assets that can be loading concurrently.
      *
+     * ROCK: raised from upstream's 2. Each streamed SOG file costs two serial round trips
+     * (meta.json, then its textures), so with only 2 in flight a high-latency link spends
+     * most of its time waiting. Measured on a 101-file LOD splat over HTTP/2 at 250 ms /
+     * 200 Mbps: time for the view to finish loading dropped 19-31% at 6; 8 was no better.
+     *
      * @private
      */
-    maxConcurrentLoads = 2;
+    maxConcurrentLoads = 6;
 
     /**
      * Maximum number of retry attempts for failed loads.
