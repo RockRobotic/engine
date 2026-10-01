@@ -11,6 +11,18 @@ const tmpVecB = new Vec3();
 /**
  * A bounding sphere is a volume for facilitating fast intersection testing.
  *
+ * A sphere is a {@link center} and a {@link radius}. It is the cheapest bounding volume to test, so
+ * it suits broad-phase checks made before a finer test. {@link containsPoint},
+ * {@link intersectsBoundingSphere} and {@link intersectsRay} return a boolean and allocate nothing.
+ * Unlike {@link BoundingBox}, the constructor keeps a reference to the center vector it is given
+ * rather than copying it, so the sphere follows any later changes to that vector.
+ *
+ * @example
+ * // A trigger volume 2 units around an entity
+ * const sphere = new BoundingSphere(entity.getPosition().clone(), 2);
+ * if (sphere.containsPoint(player.getPosition())) {
+ *     // the player is within 2 units of the entity
+ * }
  * @category Math
  */
 class BoundingSphere {
@@ -37,7 +49,7 @@ class BoundingSphere {
      * @param {number} [radius] - The radius of the bounding sphere. Defaults to 0.5.
      * @example
      * // Create a new bounding sphere centered on the origin with a radius of 0.5
-     * const sphere = new pc.BoundingSphere();
+     * const sphere = new BoundingSphere();
      */
     constructor(center = new Vec3(), radius = 0.5) {
         Debug.assert(!Object.isFrozen(center), 'The constructor of \'BoundingSphere\' does not accept a constant (frozen) object as a \'center\' parameter');
@@ -52,8 +64,8 @@ class BoundingSphere {
      * @param {Vec3} point - Point to test.
      * @returns {boolean} True if the point is inside the sphere and false otherwise.
      * @example
-     * const sphere = new pc.BoundingSphere(new pc.Vec3(0, 0, 0), 1);
-     * const point = new pc.Vec3(0.5, 0, 0);
+     * const sphere = new BoundingSphere(new Vec3(0, 0, 0), 1);
+     * const point = new Vec3(0.5, 0, 0);
      * const isInside = sphere.containsPoint(point); // true
      */
     containsPoint(point) {

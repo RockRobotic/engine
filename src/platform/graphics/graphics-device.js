@@ -12,12 +12,15 @@ import {
     CULLFACE_BACK, CULLFACE_NONE,
     CLEARFLAG_COLOR, CLEARFLAG_DEPTH,
     INDEXFORMAT_UINT16,
-    PRIMITIVE_POINTS, PRIMITIVE_TRIFAN, SEMANTIC_POSITION, TYPE_FLOAT32, PIXELFORMAT_111110F, PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F,
+    SEMANTIC_POSITION, TYPE_FLOAT32,
+    PIXELFORMAT_111110F, PIXELFORMAT_R16F, PIXELFORMAT_R32F, PIXELFORMAT_RG16F, PIXELFORMAT_RG32F,
+    PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F,
     DISPLAYFORMAT_LDR,
     semanticToLocation,
     FRONTFACE_CCW
 } from './constants.js';
 import { BlendState } from './blend-state.js';
+import { BuiltInTextures } from './built-in-textures.js';
 import { DepthState } from './depth-state.js';
 import { IndexBuffer } from './index-buffer.js';
 import { ScopeSpace } from './scope-space.js';
@@ -26,12 +29,14 @@ import { VertexFormat } from './vertex-format.js';
 import { StencilParameters } from './stencil-parameters.js';
 import { DebugGraphics } from './debug-graphics.js';
 import { StorageBuffer } from './storage-buffer.js';
+import { UniformBuffer } from './uniform-buffer.js';
 
 /**
  * @import { Compute } from './compute.js'
  * @import { DEVICETYPE_WEBGL2, DEVICETYPE_WEBGPU } from './constants.js'
  * @import { DynamicBuffers } from './dynamic-buffers.js'
  * @import { GpuProfiler } from './gpu-profiler.js'
+ * @import { MeshInstanceStorage } from './mesh-instance-storage.js'
  * @import { RenderTarget } from './render-target.js'
  * @import { Shader } from './shader.js'
  * @import { Texture } from './texture.js'
@@ -39,6 +44,8 @@ import { StorageBuffer } from './storage-buffer.js';
  */
 
 const _tempSet = new Set();
+const _tempBlendState = new BlendState();
+const _tempDepthState = new DepthState();
 
 /**
  * The graphics device manages the underlying graphics context. It is responsible for submitting
@@ -190,7 +197,7 @@ class GraphicsDevice extends EventHandler {
     maxColorAttachments = 1;
 
     /**
-     * The highest shader precision supported by this graphics device. Can be 'hiphp', 'mediump' or
+     * The highest shader precision supported by this graphics device. Can be 'highp', 'mediump' or
      * 'lowp'.
      *
      * @type {string}
@@ -229,6 +236,36 @@ class GraphicsDevice extends EventHandler {
     supportsMultiDraw = true;
 
     /**
+     * True if the device supports indirect draw calls, where the draw parameters are sourced from
+     * a GPU buffer instead of being supplied by the CPU (WebGPU only). Also see
+     * {@link MeshInstance#setIndirect}.
+     *
+     * @type {boolean}
+     * @readonly
+     */
+    supportsIndirectDraw = false;
+
+    /**
+     * True if the vertex shaders can read the model and normal matrices of a mesh instance from
+     * a storage buffer the device holds, see {@link GraphicsDevice#meshInstanceStorage} (WebGPU
+     * only).
+     *
+     * @type {boolean}
+     * @readonly
+     * @ignore
+     */
+    supportsMeshInstanceStorage = false;
+
+    /**
+     * The storage of the per mesh instance data read by the vertex shaders, or null when not
+     * supported, see {@link GraphicsDevice#supportsMeshInstanceStorage}.
+     *
+     * @type {MeshInstanceStorage|null}
+     * @ignore
+     */
+    meshInstanceStorage = null;
+
+    /**
      * True if the device supports compute shaders.
      *
      * @readonly
@@ -261,6 +298,19 @@ class GraphicsDevice extends EventHandler {
      * @readonly
      */
     supportsSubgroups = false;
+
+    /**
+     * True if the device supports subgroup size control (WebGPU only). This depends on
+     * {@link supportsSubgroups} and, when available, allows a compute shader to pin its execution
+     * to a specific subgroup size (a power of two within the {@link minSubgroupSize} to
+     * {@link maxSubgroupSize} range) via the WGSL `@subgroup_size` attribute. The
+     * `subgroup-size-control` device feature is automatically requested when this is supported, and
+     * the shader define `CAPS_SUBGROUP_SIZE_CONTROL` is set for conditional compilation.
+     *
+     * @type {boolean}
+     * @readonly
+     */
+    supportsSubgroupSizeControl = false;
 
     /**
      * True if the device supports the WGSL subgroup_uniformity extension, which allows
@@ -349,22 +399,20 @@ class GraphicsDevice extends EventHandler {
     supportsUnrestrictedPointerParameters = false;
 
     /**
-     * Maximum subgroup (warp/wavefront) size reported for the device. Zero means either
-     * subgroups are not supported ({@link supportsSubgroups} is false), or the WebGPU
-     * implementation did not expose the value.
+     * Maximum subgroup (warp/wavefront) size reported for the device. Zero means either the device
+     * does not expose subgroup sizes, or the WebGPU implementation did not report the value.
      *
      * @type {number}
-     * @ignore
+     * @readonly
      */
     maxSubgroupSize = 0;
 
     /**
-     * Minimum subgroup (warp/wavefront) size reported for the device. Zero means either
-     * subgroups are not supported ({@link supportsSubgroups} is false), or the WebGPU
-     * implementation did not expose the value.
+     * Minimum subgroup (warp/wavefront) size reported for the device. Zero means either the device
+     * does not expose subgroup sizes, or the WebGPU implementation did not report the value.
      *
      * @type {number}
-     * @ignore
+     * @readonly
      */
     minSubgroupSize = 0;
 
@@ -422,17 +470,20 @@ class GraphicsDevice extends EventHandler {
      * @type {number}
      * @ignore
      */
-    renderPassIndex;
+    renderPassIndex = 0;
 
     /** @type {boolean} */
     insideRenderPass = false;
 
     /**
-     * True if the device supports uniform buffers.
+     * True if the device binds the mesh resources through bind groups: the textures and samplers
+     * in the mesh bind group and the per-draw mesh uniforms in a dynamic uniform buffer (WebGPU).
+     * Otherwise they are set individually through the scope. Uniform buffers for the view and the
+     * materials are used on every device.
      *
      * @ignore
      */
-    supportsUniformBuffers = false;
+    usesMeshBindGroups = false;
 
     /**
      * True if the device supports clip distances (WebGPU only). Clip distances allow you to restrict
@@ -453,22 +504,24 @@ class GraphicsDevice extends EventHandler {
     supportsTransientAttachments = false;
 
     /**
-     * True if the device supports WebGPU texture format tier 1 capabilities. When enabled, a wider
-     * set of normalized texture formats can be used as render targets and storage textures.
+     * True if the device supports the WebGPU 'texture-formats-tier1' feature (WebGPU only). When
+     * available, 16-bit unorm and snorm texture formats become usable, the 8-bit snorm formats
+     * become renderable, blendable and multisample-capable, and a wider set of 8-bit and 16-bit
+     * formats can be bound as storage textures. Implied by {@link supportsTextureFormatsTier2}.
      *
      * @type {boolean}
      * @readonly
      */
-    supportsTextureFormatTier1 = false;
+    supportsTextureFormatsTier1 = false;
 
     /**
-     * True if the device supports WebGPU texture format tier 2 capabilities. This extends tier 1
-     * and enables read-write storage access for selected texture formats.
+     * True if the device supports the WebGPU 'texture-formats-tier2' feature (WebGPU only). This
+     * extends tier 1 and enables read-write storage access for additional texture formats.
      *
      * @type {boolean}
      * @readonly
      */
-    supportsTextureFormatTier2 = false;
+    supportsTextureFormatsTier2 = false;
 
     /**
      * True if the device supports primitive index in fragment shaders (WebGPU only). When
@@ -479,6 +532,26 @@ class GraphicsDevice extends EventHandler {
      * @readonly
      */
     supportsPrimitiveIndex = false;
+
+    /**
+     * True if the device supports dual-source blending, which allows a fragment shader to output a
+     * secondary color used by the source 1 blend factors.
+     *
+     * @type {boolean}
+     * @readonly
+     */
+    supportsDualSourceBlending = false;
+
+    /**
+     * True if the device supports independent blending, which allows each color attachment of a
+     * render target to use its own blend state and color write mask, specified using
+     * {@link BlendState#setAttachment}. When false, the state of the attachment 0 is used for all
+     * attachments.
+     *
+     * @type {boolean}
+     * @readonly
+     */
+    supportsIndependentBlending = false;
 
     /**
      * True if the device supports 16-bit floating-point types in shaders (WebGPU only). When
@@ -536,6 +609,15 @@ class GraphicsDevice extends EventHandler {
     textureFloatFilterable = false;
 
     /**
+     * True if blending can be used when rendering to 32-bit floating-point render targets. Note that
+     * 16-bit floating-point render targets are always blendable when they are renderable.
+     *
+     * @type {boolean}
+     * @readonly
+     */
+    textureFloatBlendable = false;
+
+    /**
      * A vertex buffer representing a quad.
      *
      * @type {VertexBuffer}
@@ -551,6 +633,14 @@ class GraphicsDevice extends EventHandler {
      * @ignore
      */
     quadIndexBuffer;
+
+    /**
+     * The textures the engine binds in place of a texture it was not given.
+     *
+     * @type {BuiltInTextures}
+     * @ignore
+     */
+    builtInTextures;
 
     /**
      * An object representing current blend state
@@ -639,12 +729,12 @@ class GraphicsDevice extends EventHandler {
     capsDefines = new Map();
 
     /**
-     * A set of maps to clear at the end of the frame.
+     * A version number incremented at the end of every frame. Frame-scoped draw commands are
+     * stamped with it, see {@link DrawCommands#validUntilVersion}.
      *
-     * @type {Set<Map>}
      * @ignore
      */
-    mapsToClear = new Set();
+    drawCommandsVersion = 0;
 
     static EVENT_RESIZE = 'resizecanvas';
 
@@ -703,10 +793,7 @@ class GraphicsDevice extends EventHandler {
         this._drawCallsPerFrame = 0;
         this._shaderSwitchesPerFrame = 0;
 
-        this._primsPerFrame = [];
-        for (let i = PRIMITIVE_POINTS; i <= PRIMITIVE_TRIFAN; i++) {
-            this._primsPerFrame[i] = 0;
-        }
+        this._primitiveCount = 0;
         this._renderTargetCreationTime = 0;
 
         // Create the ScopeNamespace for shader attributes and variables
@@ -739,6 +826,10 @@ class GraphicsDevice extends EventHandler {
         // create quad index buffer for indexed triangle list (two triangles forming a quad)
         const indices = new Uint16Array([0, 1, 2, 2, 1, 3]);
         this.quadIndexBuffer = new IndexBuffer(this, INDEXFORMAT_UINT16, 6, BUFFER_STATIC, indices.buffer);
+
+        // create the substitute textures the rendering falls back on, which cannot be created
+        // while rendering (see BuiltInTextures)
+        this.builtInTextures = new BuiltInTextures(this);
     }
 
     /**
@@ -752,9 +843,11 @@ class GraphicsDevice extends EventHandler {
         if (this.textureFloatFilterable) capsDefines.set('CAPS_TEXTURE_FLOAT_FILTERABLE', '');
         if (this.textureFloatRenderable) capsDefines.set('CAPS_TEXTURE_FLOAT_RENDERABLE', '');
         if (this.supportsMultiDraw) capsDefines.set('CAPS_MULTI_DRAW', '');
+        if (this.supportsDualSourceBlending) capsDefines.set('CAPS_DUAL_SOURCE_BLENDING', '');
         if (this.supportsPrimitiveIndex) capsDefines.set('CAPS_PRIMITIVE_INDEX', '');
         if (this.supportsShaderF16) capsDefines.set('CAPS_SHADER_F16', '');
         if (this.supportsSubgroups) capsDefines.set('CAPS_SUBGROUPS', '');
+        if (this.supportsSubgroupSizeControl) capsDefines.set('CAPS_SUBGROUP_SIZE_CONTROL', '');
         if (this.supportsSubgroupId) capsDefines.set('CAPS_SUBGROUP_ID', '');
         if (this.supportsLinearIndexing) capsDefines.set('CAPS_LINEAR_INDEXING', '');
         if (this.supportsUnrestrictedPointerParameters) capsDefines.set('CAPS_UNRESTRICTED_POINTER_PARAMETERS', '');
@@ -771,6 +864,35 @@ class GraphicsDevice extends EventHandler {
     }
 
     /**
+     * Samples existing resource registries for diagnostic overlays. Counts include internal
+     * resources; dynamic uniform buffers count backing GPU buffers, not suballocations or staging
+     * buffers. This walks the buffer registry and should only be called at diagnostic refresh rates.
+     *
+     * @param {Map<string, number>} counts - Receives the current counts, replacing previous values.
+     * @ignore
+     */
+    getResourceCounts(counts) {
+        let vertexBuffers = 0;
+        let indexBuffers = 0;
+        let uniformBuffers = this.dynamicBuffers?.bufferCount ?? 0;
+        let storageBuffers = 0;
+        for (const buffer of this.buffers) {
+            if (buffer instanceof VertexBuffer) vertexBuffers++;
+            else if (buffer instanceof IndexBuffer) indexBuffers++;
+            else if (buffer instanceof UniformBuffer) uniformBuffers++;
+            else if (buffer instanceof StorageBuffer) storageBuffers++;
+            else Debug.assert(false);
+        }
+        counts.set('vertexBuffers', vertexBuffers);
+        counts.set('indexBuffers', indexBuffers);
+        counts.set('uniformBuffers', uniformBuffers);
+        counts.set('storageBuffers', storageBuffers);
+        counts.set('textures', this.textures.size);
+        counts.set('renderTargets', this.targets.size);
+        counts.set('shaders', this.shaders.length);
+    }
+
+    /**
      * Destroy the graphics device.
      */
     destroy() {
@@ -784,11 +906,18 @@ class GraphicsDevice extends EventHandler {
         this.quadIndexBuffer?.destroy();
         this.quadIndexBuffer = null;
 
+        this.builtInTextures?.destroy();
+        this.builtInTextures = null;
+
         this.dynamicBuffers?.destroy();
         this.dynamicBuffers = null;
 
         this.gpuProfiler?.destroy();
         this.gpuProfiler = null;
+
+        // after the destroy event, whose listeners may free the slots of their mesh instances
+        this.meshInstanceStorage?.destroy();
+        this.meshInstanceStorage = null;
 
         this._destroyed = true;
     }
@@ -827,7 +956,7 @@ class GraphicsDevice extends EventHandler {
      */
     loseContext() {
 
-        Debug.log('pc.GraphicsDevice: Graphics context lost.');
+        Debug.log('GraphicsDevice: Graphics context lost.');
 
         this.contextLost = true;
 
@@ -861,7 +990,7 @@ class GraphicsDevice extends EventHandler {
      */
     restoreContext() {
 
-        Debug.log('pc.GraphicsDevice: Graphics context restored.');
+        Debug.log('GraphicsDevice: Graphics context restored.');
 
         this.contextLost = false;
 
@@ -874,6 +1003,32 @@ class GraphicsDevice extends EventHandler {
         }
 
         this.gpuProfiler?.restoreContext?.();
+    }
+
+    /**
+     * Reports whether the device is lost or destroyed, including a native loss whose event has not
+     * arrived yet.
+     *
+     * @returns {boolean} Whether the device is lost or destroyed.
+     * @ignore
+     */
+    isContextLost() {
+        return !!this.contextLost || this._destroyed;
+    }
+
+    /**
+     * Forces an actual graphics context or device loss for testing, then attempts recovery after
+     * the specified delay. Only has an effect in debug builds on WebGL and WebGPU. Calls made while
+     * a loss or recovery is pending are ignored. Recovery is asynchronous and is not guaranteed
+     * to succeed. Listen for `devicelost` and `devicerestored` to observe the recovery lifecycle.
+     *
+     * @param {number} [delay] - Delay in milliseconds after loss is observed before attempting
+     * recovery. Defaults to 100.
+     * @ignore
+     * @example
+     * app.graphicsDevice.debugLoseContext(1000);
+     */
+    debugLoseContext(delay = 100) {
     }
 
     // don't stringify GraphicsDevice to JSON by JSON.stringify
@@ -895,6 +1050,7 @@ class GraphicsDevice extends EventHandler {
         this.depthState = new DepthState();
         this.cullMode = CULLFACE_BACK;
         this.frontFace = FRONTFACE_CCW;
+        this.alphaToCoverage = false;
 
         // Cached viewport and scissor dimensions
         this.vx = this.vy = this.vw = this.vh = 0;
@@ -902,6 +1058,263 @@ class GraphicsDevice extends EventHandler {
 
         this.blendColor = new Color(0, 0, 0, 0);
     }
+
+    // ---- deprecated block start ----
+
+    /**
+     * @deprecated The limit has been removed.
+     * @ignore
+     */
+    get boneLimit() {
+        Debug.deprecated('GraphicsDevice#boneLimit is deprecated and the limit has been removed.');
+        return 1024;
+    }
+
+    /**
+     * @deprecated Use GraphicsDevice#isWebGL2 instead.
+     * @ignore
+     */
+    get webgl2() {
+        Debug.deprecated('GraphicsDevice#webgl2 is deprecated, use GraphicsDevice#isWebGL2 instead.');
+        return this.isWebGL2;
+    }
+
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
+    get textureFloatHighPrecision() {
+        Debug.deprecated('GraphicsDevice#textureFloatHighPrecision is deprecated and always returns true.');
+        return true;
+    }
+
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
+    get extBlendMinmax() {
+        Debug.deprecated('GraphicsDevice#extBlendMinmax is deprecated as it is always true.');
+        return true;
+    }
+
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
+    get extTextureHalfFloat() {
+        Debug.deprecated('GraphicsDevice#extTextureHalfFloat is deprecated as it is always true.');
+        return true;
+    }
+
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
+    get extTextureLod() {
+        Debug.deprecated('GraphicsDevice#extTextureLod is deprecated as it is always true.');
+        return true;
+    }
+
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
+    get textureHalfFloatFilterable() {
+        Debug.deprecated('GraphicsDevice#textureHalfFloatFilterable is deprecated as it is always true.');
+        return true;
+    }
+
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
+    get supportsMrt() {
+        Debug.deprecated('GraphicsDevice#supportsMrt is deprecated as it is always true.');
+        return true;
+    }
+
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
+    get supportsVolumeTextures() {
+        Debug.deprecated('GraphicsDevice#supportsVolumeTextures is deprecated as it is always true.');
+        return true;
+    }
+
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
+    get supportsInstancing() {
+        Debug.deprecated('GraphicsDevice#supportsInstancing is deprecated as it is always true.');
+        return true;
+    }
+
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
+    get textureHalfFloatUpdatable() {
+        Debug.deprecated('GraphicsDevice#textureHalfFloatUpdatable is deprecated as it is always true.');
+        return true;
+    }
+
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
+    get extTextureFloat() {
+        Debug.deprecated('GraphicsDevice#extTextureFloat is deprecated as it is always true');
+        return true;
+    }
+
+    /**
+     * @deprecated Always returns true.
+     * @ignore
+     */
+    get extStandardDerivatives() {
+        Debug.deprecated('GraphicsDevice#extStandardDerivatives is deprecated as it is always true.');
+        return true;
+    }
+
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {number} blendSrc - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @param {number} blendDst - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @ignore
+     */
+    setBlendFunction(blendSrc, blendDst) {
+        Debug.deprecated('GraphicsDevice#setBlendFunction is deprecated, use GraphicsDevice.setBlendState instead.');
+        const currentBlendState = this.blendState;
+        _tempBlendState.copy(currentBlendState);
+        _tempBlendState.setColorBlend(currentBlendState.colorOp, blendSrc, blendDst);
+        _tempBlendState.setAlphaBlend(currentBlendState.alphaOp, blendSrc, blendDst);
+        this.setBlendState(_tempBlendState);
+    }
+
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {number} blendSrc - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @param {number} blendDst - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @param {number} blendSrcAlpha - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @param {number} blendDstAlpha - The blend mode. Can be any of the BLENDMODE_* constants.
+     * @ignore
+     */
+    setBlendFunctionSeparate(blendSrc, blendDst, blendSrcAlpha, blendDstAlpha) {
+        Debug.deprecated('GraphicsDevice#setBlendFunctionSeparate is deprecated, use GraphicsDevice.setBlendState instead.');
+        const currentBlendState = this.blendState;
+        _tempBlendState.copy(currentBlendState);
+        _tempBlendState.setColorBlend(currentBlendState.colorOp, blendSrc, blendDst);
+        _tempBlendState.setAlphaBlend(currentBlendState.alphaOp, blendSrcAlpha, blendDstAlpha);
+        this.setBlendState(_tempBlendState);
+    }
+
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {number} blendEquation - The blend equation. Can be any of the BLENDEQUATION_*
+     * constants.
+     * @ignore
+     */
+    setBlendEquation(blendEquation) {
+        Debug.deprecated('GraphicsDevice#setBlendEquation is deprecated, use GraphicsDevice.setBlendState instead.');
+        const currentBlendState = this.blendState;
+        _tempBlendState.copy(currentBlendState);
+        _tempBlendState.setColorBlend(blendEquation, currentBlendState.colorSrcFactor, currentBlendState.colorDstFactor);
+        _tempBlendState.setAlphaBlend(blendEquation, currentBlendState.alphaSrcFactor, currentBlendState.alphaDstFactor);
+        this.setBlendState(_tempBlendState);
+    }
+
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {number} blendEquation - The blend equation. Can be any of the BLENDEQUATION_*
+     * constants.
+     * @param {number} blendAlphaEquation - The blend equation. Can be any of the BLENDEQUATION_*
+     * constants.
+     * @ignore
+     */
+    setBlendEquationSeparate(blendEquation, blendAlphaEquation) {
+        Debug.deprecated('GraphicsDevice#setBlendEquationSeparate is deprecated, use GraphicsDevice.setBlendState instead.');
+        const currentBlendState = this.blendState;
+        _tempBlendState.copy(currentBlendState);
+        _tempBlendState.setColorBlend(blendEquation, currentBlendState.colorSrcFactor, currentBlendState.colorDstFactor);
+        _tempBlendState.setAlphaBlend(blendAlphaEquation, currentBlendState.alphaSrcFactor, currentBlendState.alphaDstFactor);
+        this.setBlendState(_tempBlendState);
+    }
+
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {boolean} redWrite - True to enable writing of the red channel and false otherwise.
+     * @param {boolean} greenWrite - True to enable writing of the green channel and false otherwise.
+     * @param {boolean} blueWrite - True to enable writing of the blue channel and false otherwise.
+     * @param {boolean} alphaWrite - True to enable writing of the alpha channel and false otherwise.
+     * @ignore
+     */
+    setColorWrite(redWrite, greenWrite, blueWrite, alphaWrite) {
+        Debug.deprecated('GraphicsDevice#setColorWrite is deprecated, use GraphicsDevice.setBlendState instead.');
+        const currentBlendState = this.blendState;
+        _tempBlendState.copy(currentBlendState);
+        _tempBlendState.setColorWrite(redWrite, greenWrite, blueWrite, alphaWrite);
+        this.setBlendState(_tempBlendState);
+    }
+
+    getBlending() {
+        return this.blendState.blend;
+    }
+
+    /**
+     * @deprecated Use GraphicsDevice.setBlendState instead.
+     * @param {boolean} blending - True to enable blending and false to disable it.
+     * @ignore
+     */
+    setBlending(blending) {
+        Debug.deprecated('GraphicsDevice#setBlending is deprecated, use GraphicsDevice.setBlendState instead.');
+        _tempBlendState.copy(this.blendState);
+        _tempBlendState.blend = blending;
+        this.setBlendState(_tempBlendState);
+    }
+
+    /**
+     * @deprecated Use GraphicsDevice.setDepthState instead.
+     * @param {boolean} write - True to enable depth writing and false otherwise.
+     * @ignore
+     */
+    setDepthWrite(write) {
+        Debug.deprecated('GraphicsDevice#setDepthWrite is deprecated, use GraphicsDevice.setDepthState instead.');
+        _tempDepthState.copy(this.depthState);
+        _tempDepthState.write = write;
+        this.setDepthState(_tempDepthState);
+    }
+
+    /**
+     * @deprecated Use GraphicsDevice.setDepthState instead.
+     * @param {number} func - The depth testing function. Can be any of the FUNC_* constants.
+     * @ignore
+     */
+    setDepthFunc(func) {
+        Debug.deprecated('GraphicsDevice#setDepthFunc is deprecated, use GraphicsDevice.setDepthState instead.');
+        _tempDepthState.copy(this.depthState);
+        _tempDepthState.func = func;
+        this.setDepthState(_tempDepthState);
+    }
+
+    /**
+     * @deprecated Use GraphicsDevice.setDepthState instead.
+     * @param {boolean} test - True to enable depth testing and false otherwise.
+     * @ignore
+     */
+    setDepthTest(test) {
+        Debug.deprecated('GraphicsDevice#setDepthTest is deprecated, use GraphicsDevice.setDepthState instead.');
+        _tempDepthState.copy(this.depthState);
+        _tempDepthState.test = test;
+        this.setDepthState(_tempDepthState);
+    }
+
+    getCullMode() {
+        return this.cullMode;
+    }
+
+    // ---- deprecated block end ----
 
     /**
      * Sets the specified stencil state. If both stencilFront and stencilBack are null, stencil
@@ -1034,7 +1447,12 @@ class GraphicsDevice extends EventHandler {
      * @ignore
      */
     clearVertexBuffer() {
-        this.vertexBuffers.length = 0;
+        // Popped rather than assigning a zero length, which releases the array's backing store,
+        // so that the next setVertexBuffer - on the next draw - would allocate a new one
+        const vertexBuffers = this.vertexBuffers;
+        while (vertexBuffers.length > 0) {
+            vertexBuffers.pop();
+        }
     }
 
     /**
@@ -1043,6 +1461,9 @@ class GraphicsDevice extends EventHandler {
      * parameters and by {@link MeshInstance#setIndirect} to configure indirect draw calls.
      *
      * When reserving multiple consecutive slots, specify the optional `count` parameter.
+     *
+     * Only available on WebGPU, see {@link GraphicsDevice#supportsIndirectDraw}. Returns 0 on
+     * other platforms.
      *
      * @param {number} [count] - Number of consecutive slots to reserve. Defaults to 1.
      * @returns {number} - The first reserved slot index used for indirect rendering.
@@ -1160,10 +1581,12 @@ class GraphicsDevice extends EventHandler {
      * When set to true, vertex and index buffers related state is set up. Defaults to true.
      * @param {boolean} [last] - True if this is the last draw call in a sequence of draw calls.
      * When set to true, vertex and index buffers related state is cleared. Defaults to true.
+     * @param {number} [firstInstance] - The first instance of a draw without draw commands,
+     * which offsets the instance index of the vertex shader. Ignored on WebGL. Defaults to 0.
      * @example
      * // Render a single, unindexed triangle
      * device.draw({
-     *     type: pc.PRIMITIVE_TRIANGLES,
+     *     type: PRIMITIVE_TRIANGLES,
      *     base: 0,
      *     count: 3,
      *     indexed: false
@@ -1171,7 +1594,7 @@ class GraphicsDevice extends EventHandler {
      *
      * @ignore
      */
-    draw(primitive, indexBuffer, numInstances, drawCommands, first = true, last = true) {
+    draw(primitive, indexBuffer, numInstances, drawCommands, first = true, last = true, firstInstance = 0) {
         Debug.assert(false);
     }
 
@@ -1429,9 +1852,8 @@ class GraphicsDevice extends EventHandler {
      * @ignore
      */
     frameEnd() {
-        // clear all maps scheduled for end of frame clearing
-        this.mapsToClear.forEach(map => map.clear());
-        this.mapsToClear.clear();
+        // expire frame-scoped draw commands - the indirect draw slots they reference are recycled
+        this.drawCommandsVersion++;
     }
 
     /**
@@ -1452,22 +1874,35 @@ class GraphicsDevice extends EventHandler {
      * formats on the majority of devices apart from some very old iOS and Android devices (99%).
      * - When the `filterable` parameter is set to true, the function returns a format on a
      * considerably lower number of devices (70%).
+     * - Support is determined by the precision of a format and not by its number of channels, and so
+     * all the half float formats are supported wherever any of them is, and similarly for the 32bit
+     * float formats.
      *
      * @param {number[]} [formats] - An array of pixel formats to check for support. Can contain:
      *
      * - {@link PIXELFORMAT_111110F}
+     * - {@link PIXELFORMAT_R16F}
+     * - {@link PIXELFORMAT_R32F}
+     * - {@link PIXELFORMAT_RG16F}
+     * - {@link PIXELFORMAT_RG32F}
      * - {@link PIXELFORMAT_RGBA16F}
      * - {@link PIXELFORMAT_RGBA32F}
      *
-     * @param {boolean} [filterable] - If true, the format also needs to be filterable. Defaults to
-     * true.
+     * Any other format in the array is skipped, allowing a non-HDR format to be included in the
+     * list and handled by the caller's own fallback.
+     *
+     * @param {boolean} [filterable] - If true, the format also needs to be filterable, allowing it
+     * to be sampled with linear filtering. Defaults to true.
      * @param {number} [samples] - The number of samples to check for. Some formats are not
      * compatible with multi-sampling, for example {@link PIXELFORMAT_RGBA32F} on WebGPU platform.
      * Defaults to 1.
+     * @param {boolean} [blendable] - If true, the format also needs to be blendable, allowing it to
+     * be used as a blended render target attachment. This is an independent capability to
+     * filtering, and only the 32bit float formats can fail to support it. Defaults to false.
      * @returns {number|undefined} The first supported renderable HDR format or undefined if none is
      * supported.
      */
-    getRenderableHdrFormat(formats = [PIXELFORMAT_111110F, PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F], filterable = true, samples = 1) {
+    getRenderableHdrFormat(formats = [PIXELFORMAT_111110F, PIXELFORMAT_RGBA16F, PIXELFORMAT_RGBA32F], filterable = true, samples = 1, blendable = false) {
         for (let i = 0; i < formats.length; i++) {
             const format = formats[i];
             switch (format) {
@@ -1479,20 +1914,31 @@ class GraphicsDevice extends EventHandler {
                     break;
                 }
 
+                case PIXELFORMAT_R16F:
+                case PIXELFORMAT_RG16F:
                 case PIXELFORMAT_RGBA16F:
+
+                    // half float formats are filterable and blendable wherever they are
+                    // renderable, so those requirements need no additional test
                     if (this.textureHalfFloatRenderable) {
                         return format;
                     }
                     break;
 
+                case PIXELFORMAT_R32F:
+                case PIXELFORMAT_RG32F:
                 case PIXELFORMAT_RGBA32F:
 
-                    // on WebGPU platform, RGBA32F is not compatible with multi-sampling
+                    // on WebGPU platform, 32bit float formats are not compatible with multi-sampling
                     if (this.isWebGPU && samples > 1) {
                         continue;
                     }
 
-                    if (this.textureFloatRenderable && (!filterable || this.textureFloatFilterable)) {
+                    // unlike the smaller float formats, filtering and blending of the 32bit float
+                    // formats are both optional capabilities, tested for independently
+                    if (this.textureFloatRenderable &&
+                        (!filterable || this.textureFloatFilterable) &&
+                        (!blendable || this.textureFloatBlendable)) {
                         return format;
                     }
                     break;
@@ -1506,26 +1952,25 @@ class GraphicsDevice extends EventHandler {
      * vertex buffers.
      *
      * @param {Shader} shader - The shader to validate.
-     * @param {VertexFormat} vb0Format - The format of the first vertex buffer.
-     * @param {VertexFormat} vb1Format - The format of the second vertex buffer.
+     * @param {(VertexBuffer|null|undefined)[]} vertexBuffers - The vertex buffers of the draw.
      * @protected
      */
-    validateAttributes(shader, vb0Format, vb1Format) {
+    validateAttributes(shader, vertexBuffers) {
 
         Debug.call(() => {
 
             // add all attribute locations from vertex formats to the set
             _tempSet.clear();
-            vb0Format?.elements.forEach(element => _tempSet.add(semanticToLocation[element.name]));
-            vb1Format?.elements.forEach(element => _tempSet.add(semanticToLocation[element.name]));
+            for (let i = 0; i < vertexBuffers.length; i++) {
+                vertexBuffers[i]?.format.elements.forEach(element => _tempSet.add(semanticToLocation[element.name]));
+            }
 
             // every location shader needs must be in the vertex buffer
             for (const [location, name] of shader.attributes) {
                 if (!_tempSet.has(location)) {
                     Debug.errorOnce(`Vertex attribute [${name}] at location ${location} required by the shader is not present in the currently assigned vertex buffers, while rendering [${DebugGraphics.toString()}]`, {
                         shader,
-                        vb0Format,
-                        vb1Format
+                        vertexBuffers
                     });
                 }
             }

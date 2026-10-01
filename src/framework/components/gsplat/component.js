@@ -34,7 +34,7 @@ const UNIFIED_LEGACY_HINT = 'GSplatComponent#unified now defaults to true (unifi
  * GSplatComponent to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('gsplat', {
  *     asset: asset
  * });
@@ -44,7 +44,7 @@ const UNIFIED_LEGACY_HINT = 'GSplatComponent#unified now defaults to true (unifi
  * property:
  *
  * ```javascript
- * entity.gsplat.customAabb = new pc.BoundingBox(new pc.Vec3(), new pc.Vec3(10, 10, 10));
+ * entity.gsplat.customAabb = new BoundingBox(new Vec3(), new Vec3(10, 10, 10));
  *
  * console.log(entity.gsplat.customAabb);
  * ```
@@ -52,8 +52,9 @@ const UNIFIED_LEGACY_HINT = 'GSplatComponent#unified now defaults to true (unifi
  * Relevant Engine API examples:
  *
  * - [Simple Splat Loading](https://playcanvas.github.io/#/gaussian-splatting/simple)
+ * - [Billions of Splats](https://playcanvas.github.io/#/gaussian-splatting/billions)
+ * - [Downtown Streaming](https://playcanvas.github.io/#/gaussian-splatting/downtown)
  * - [Global Sorting](https://playcanvas.github.io/#/gaussian-splatting/global-sorting)
- * - [LOD](https://playcanvas.github.io/#/gaussian-splatting/lod)
  * - [LOD Instances](https://playcanvas.github.io/#/gaussian-splatting/lod-instances)
  * - [LOD Streaming](https://playcanvas.github.io/#/gaussian-splatting/lod-streaming)
  * - [LOD Streaming with Spherical Harmonics](https://playcanvas.github.io/#/gaussian-splatting/lod-streaming-sh)
@@ -98,14 +99,14 @@ class GSplatComponent extends Component {
     _materialTmp = null;
 
     /**
-     * Base distance for the first LOD transition (LOD 0 to LOD 1).
+     * Base distance for the first LOD transition.
      *
      * @private
      */
     _lodBaseDistance = 5;
 
     /**
-     * Geometric multiplier between successive LOD distance thresholds.
+     * Geometric multiplier between successive LOD transition distances.
      *
      * @private
      */
@@ -385,10 +386,34 @@ class GSplatComponent extends Component {
     }
 
     /**
-     * Sets the base distance for the first LOD transition (LOD 0 to LOD 1). Objects closer
-     * than this distance use the highest quality LOD. Each subsequent LOD level transitions
-     * at a progressively larger distance, controlled by {@link lodMultiplier}. Clamped to a
-     * minimum of 0.1. Defaults to 5.
+     * @type {number}
+     * @deprecated Use {@link GSplatComponent#lodBaseDistance} and
+     * {@link GSplatComponent#lodMultiplier} instead.
+     * @ignore
+     */
+    set lodFalloff(value) {
+        Debug.removed('GSplatComponent#lodFalloff is removed. Use GSplatComponent#lodBaseDistance and GSplatComponent#lodMultiplier to control how detail falls off with distance.');
+    }
+
+    /**
+     * @type {number}
+     * @deprecated Use {@link GSplatComponent#lodBaseDistance} and
+     * {@link GSplatComponent#lodMultiplier} instead.
+     * @ignore
+     */
+    get lodFalloff() {
+        Debug.removed('GSplatComponent#lodFalloff is removed. Use GSplatComponent#lodBaseDistance and GSplatComponent#lodMultiplier to control how detail falls off with distance.');
+        return 1;
+    }
+
+    /**
+     * Sets the base distance for the first LOD transition (LOD 0 to LOD 1). Objects closer than
+     * this distance use the highest quality LOD. Each subsequent LOD level transitions at a
+     * progressively larger distance, controlled by {@link GSplatComponent#lodMultiplier}. In world
+     * units, and compensated for the camera's field of view. How these distances combine with the
+     * scene's splat budget is set by {@link GSplatParams#splatBudgetMode}: in target mode they only
+     * shape the falloff and how detail divides between splats, in limit mode they decide the
+     * detail. Clamped to a minimum of 0.1. Defaults to 5.
      *
      * @type {number}
      */
@@ -409,13 +434,12 @@ class GSplatComponent extends Component {
     }
 
     /**
-     * Sets the multiplier between successive LOD distance thresholds. Each LOD level
-     * transitions at this factor times the previous level's distance, creating a geometric
-     * progression. Lower values keep higher quality at distance; higher values switch to
-     * coarser LODs sooner. Clamped to a minimum of 1.2 to avoid degenerate logarithmic LOD
-     * computation. LOD distances are automatically compensated for the camera's field of
-     * view — a wider FOV makes objects appear smaller on screen, so LOD switches to coarser
-     * levels sooner to match the reduced screen-space detail. Defaults to 3.
+     * Sets the multiplier between successive LOD distance thresholds. Each LOD level transitions
+     * at this factor times the previous level's distance, creating a geometric progression. Higher
+     * values keep finer detail further from the camera, at a higher memory cost; lower values
+     * switch to coarser levels sooner. LOD distances are compensated for the camera's field of
+     * view - a wider FOV makes objects appear smaller on screen, so LOD switches to coarser levels
+     * sooner. Clamped to a minimum of 1.2. Defaults to 3.
      *
      * @type {number}
      */
@@ -485,24 +509,20 @@ class GSplatComponent extends Component {
 
     /**
      * @type {number[]|null}
-     * @deprecated Use {@link lodBaseDistance} and {@link lodMultiplier} instead.
+     * @deprecated Use {@link GSplatComponent#lodBaseDistance} and {@link GSplatComponent#lodMultiplier} instead.
      * @ignore
      */
     set lodDistances(value) {
-        Debug.removed('GSplatComponent#lodDistances is removed. Use lodBaseDistance and lodMultiplier instead.');
-        if (Array.isArray(value) && value.length > 0) {
-            this.lodBaseDistance = value[0];
-            this.lodMultiplier = 3;
-        }
+        Debug.removed('GSplatComponent#lodDistances is removed. Use GSplatComponent#lodBaseDistance and GSplatComponent#lodMultiplier to set the LOD transition distances.');
     }
 
     /**
      * @type {number[]}
-     * @deprecated Use {@link lodBaseDistance} and {@link lodMultiplier} instead.
+     * @deprecated Use {@link GSplatComponent#lodBaseDistance} and {@link GSplatComponent#lodMultiplier} instead.
      * @ignore
      */
     get lodDistances() {
-        Debug.removed('GSplatComponent#lodDistances is removed. Use lodBaseDistance and lodMultiplier instead.');
+        Debug.removed('GSplatComponent#lodDistances is removed. Use GSplatComponent#lodBaseDistance and GSplatComponent#lodMultiplier to set the LOD transition distances.');
         return [];
     }
 
@@ -819,21 +839,30 @@ class GSplatComponent extends Component {
     }
 
     onBeforeRemove() {
+        // removing a component does not disable it first, so undo what onEnable set up
+        if (this.enabled && this.entity.enabled) {
+            this.onDisable();
+        }
+
         this.destroyInstance();
 
         this.asset = null;
         this._assetReference.id = null;
 
         this.entity.off('remove', this.onRemoveChild, this);
+        this.entity.off('removehierarchy', this.onRemoveChild, this);
         this.entity.off('insert', this.onInsertChild, this);
+        this.entity.off('inserthierarchy', this.onInsertChild, this);
     }
 
     onLayersChanged(oldComp, newComp) {
         this.addToLayers();
-        oldComp.off('add', this.onLayerAdded, this);
-        oldComp.off('remove', this.onLayerRemoved, this);
-        newComp.on('add', this.onLayerAdded, this);
-        newComp.on('remove', this.onLayerRemoved, this);
+
+        // store the new handles, so that onDisable can unsubscribe from the current composition
+        this._evtLayerAdded?.off();
+        this._evtLayerAdded = newComp.on('add', this.onLayerAdded, this);
+        this._evtLayerRemoved?.off();
+        this._evtLayerRemoved = newComp.on('remove', this.onLayerRemoved, this);
     }
 
     onLayerAdded(layer) {
@@ -923,7 +952,7 @@ class GSplatComponent extends Component {
     setParameter(name, data) {
         const scopeId = this.system.app.graphicsDevice.scope.resolve(name);
         this._parameters.set(name, { scopeId, data });
-        if (this._placement) this._placement.renderDirty = true;
+        if (this._placement) this._placement.markDirty();
     }
 
     /**
@@ -943,7 +972,7 @@ class GSplatComponent extends Component {
      */
     deleteParameter(name) {
         this._parameters.delete(name);
-        if (this._placement) this._placement.renderDirty = true;
+        if (this._placement) this._placement.markDirty();
     }
 
     /**
@@ -955,7 +984,7 @@ class GSplatComponent extends Component {
      * @example
      * // Add an instance stream to the resource format
      * resource.format.addExtraStreams([
-     *     { name: 'instanceTint', format: pc.PIXELFORMAT_RGBA8, storage: pc.GSPLAT_STREAM_INSTANCE }
+     *     { name: 'instanceTint', format: PIXELFORMAT_RGBA8, storage: GSPLAT_STREAM_INSTANCE }
      * ]);
      *
      * // Get the instance texture and fill it with data

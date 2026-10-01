@@ -16,9 +16,10 @@ import {
     UNIFORMTYPE_UINT,
     UNIFORMTYPE_VEC4
 } from '../../platform/graphics/constants.js';
-import { BLEND_PREMULTIPLIED, LIGHTTYPE_DIRECTIONAL } from '../constants.js';
+import { BLEND_PREMULTIPLIED } from '../constants.js';
 import { ShaderMaterial } from '../materials/shader-material.js';
 import { MeshInstance } from '../mesh-instance.js';
+import { needsShadowRendering } from '../renderer/shadow-renderer.js';
 import { GSplatResourceBase } from '../gsplat/gsplat-resource-base.js';
 import { computeGsplatShadowCullSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-shadow-cull.js';
 import { computeGsplatShadowIndirectArgsSource } from '../shader-lib/wgsl/chunks/gsplat/compute-gsplat-shadow-indirect-args.js';
@@ -203,7 +204,7 @@ class GSplatShadowRenderer {
      * resolve each light's shadow camera via `light.getRenderData(sceneCamera, 0)`.
      * @param {Layer} layer - The layer to register shadow casters on (and read directional lights from).
      * @param {GSplatWorld} world - The shared world (work buffer, cull bounds, world states).
-     * @param {import('./gsplat-hybrid-renderer-scratch.js').GSplatHybridRendererScratch|null} [scratch] -
+     * @param {import('./gsplat-hybrid-renderer-scratch.js').GSplatHybridRendererScratch|null} [scratch]
      * Manager-owned shared scratch; forwarded to the pass-1 compaction so its candidate index list is
      * shared with the forward hybrid renderer (they use it at disjoint points in the frame).
      */
@@ -395,7 +396,7 @@ class GSplatShadowRenderer {
      * (warned once); they would need a per-cascade cull.
      */
     syncLights() {
-        const lights = this.layer.splitLights[LIGHTTYPE_DIRECTIONAL];
+        const lights = this.layer.getLightList().directional;
 
         // build the set of lights that should have a draw entry this frame
         const desired = this._desiredLights;
@@ -430,7 +431,7 @@ class GSplatShadowRenderer {
      * Post-cull pass: for each light entry run the two-pass cull (coarse candidate compaction with
      * the light frustum, then a flat per-splat fine cull) and the indirect-args write, then bind the
      * results to the entry's mesh instance. Runs after `cullComposition` and before the frame graph
-     * renders the shadow maps.
+     * renders the shadow maps. Cached shadows skip both preparation and compute dispatches.
      *
      * @param {GSplatParams} gsplatParams - Scene gsplat params (alphaClip etc.).
      */
@@ -445,28 +446,41 @@ class GSplatShadowRenderer {
             return;
         }
 
-        // upload interval metadata to the pass-1 compaction (cached per world-state version)
-        this._compaction.uploadIntervals(worldState);
-
-        // Refresh the per-node world transforms the coarse cull reads. The forward renderer also
-        // does this each frame, but a shadow-only manager has no forward pass — so we keep them
-        // current here (cheap: one matrix per splat placement, correct for moving splats).
-        this.world.workBuffer.frustumCuller.updateTransformsData(worldState.boundsGroups);
-
-        // Apply the scene material's user vertex-modify chunk + forward its parameters to the
-        // per-light shadow materials, so cast shadows follow the same per-vertex animation as the
-        // forward pass (the shadow draw uses the same quad VS).
-        this._syncUserModify(gsplatParams);
-
-        // (re)build the cull shader if the work-buffer format or the user modify chunk changed, so
-        // the cull reads the current format and culls on the same modified positions as the draw.
-        this._ensureCullShader();
-
         const numIntervals = worldState.totalIntervals;
         const totalActiveSplats = worldState.totalActiveSplats;
         const textureSize = this.world.workBuffer.textureSize;
+        let prepared = false;
+        const camera = this.cameraNode.camera?.camera;
 
         this.entries.forEach((entry) => {
+            const { light } = entry;
+            if (!needsShadowRendering(light) || !camera) {
+                return;
+            }
+
+            // The scheduled mask includes mandatory refreshes after shadow-map recreation,
+            // even when the application's per-cascade override still requests a cached shadow.
+            const renderData = light.getRenderData(camera, 0);
+            if (!renderData.shadowCullRequested || !(renderData.shadowCascadeMask & 1)) {
+                return;
+            }
+
+            // Defer shared preparation until a shadow needs updating. One-shot modes are still
+            // pending here: the renderer consumes them after all shadow culls have completed.
+            if (!prepared) {
+                prepared = true;
+
+                // upload interval metadata to the pass-1 compaction (cached per world-state version)
+                this._compaction.uploadIntervals(worldState);
+
+                // A shadow-only manager has no forward pass to refresh these transforms.
+                this.world.workBuffer.frustumCuller.updateTransformsData(worldState.boundsGroups);
+
+                // Match the forward pass's vertex modifiers and current work-buffer format.
+                this._syncUserModify(gsplatParams);
+                this._ensureCullShader();
+            }
+
             this._cullEntry(entry, numIntervals, totalActiveSplats, textureSize, gsplatParams);
         });
     }
@@ -669,14 +683,10 @@ class GSplatShadowRenderer {
      * @private
      */
     _fillFrustumPlanes(frustum) {
-        const p = this._frustumPlanes;
-        for (let i = 0; i < 6; i++) {
-            const plane = frustum.planes[i];
-            p[i * 4 + 0] = plane.normal.x;
-            p[i * 4 + 1] = plane.normal.y;
-            p[i * 4 + 2] = plane.normal.z;
-            p[i * 4 + 3] = plane.distance;
-        }
+        // the frustum stores its planes in the packed vec4(normal.xyz, distance) form the shader
+        // wants, so this is a straight copy. Kept as a copy rather than sharing the frustum's array,
+        // so this buffer stays owned by the light currently being culled.
+        this._frustumPlanes.set(frustum.planeData);
     }
 
     /**

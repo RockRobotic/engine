@@ -1,7 +1,28 @@
 // @config
 // @flag HIDDEN
 
-import * as pc from 'playcanvas';
+import {
+    AppBase,
+    AppOptions,
+    Asset,
+    AssetListLoader,
+    CameraComponentSystem,
+    Color,
+    ContainerHandler,
+    Entity,
+    FILLMODE_FILL_WINDOW,
+    LightComponentSystem,
+    RESOLUTION_AUTO,
+    RenderComponentSystem,
+    ScriptComponentSystem,
+    ScriptHandler,
+    StandardMaterial,
+    TEXTURETYPE_RGBP,
+    TONEMAP_ACES,
+    TextureHandler,
+    Vec3,
+    createGraphicsDevice
+} from 'playcanvas';
 import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs';
 
 import { deviceType } from 'examples/context';
@@ -10,38 +31,38 @@ const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('applic
 window.focus();
 
 const assets = {
-    helipad: new pc.Asset(
+    helipad: new Asset(
         'morning-env-atlas',
         'texture',
         { url: './assets/cubemaps/morning-env-atlas.png' },
-        { type: pc.TEXTURETYPE_RGBP, mipmaps: false }
+        { type: TEXTURETYPE_RGBP, mipmaps: false }
     ),
-    model: new pc.Asset('model', 'container', { url: './assets/models/TwoSidedPlane.glb' })
+    model: new Asset('model', 'container', { url: './assets/models/TwoSidedPlane.glb' })
 };
 
 const gfxOptions = {
     deviceTypes: [deviceType]
 };
 
-const device = await pc.createGraphicsDevice(canvas, gfxOptions);
+const device = await createGraphicsDevice(canvas, gfxOptions);
 device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
 
-const createOptions = new pc.AppOptions();
+const createOptions = new AppOptions();
 createOptions.graphicsDevice = device;
 
 createOptions.componentSystems = [
-    pc.RenderComponentSystem,
-    pc.CameraComponentSystem,
-    pc.LightComponentSystem,
-    pc.ScriptComponentSystem
+    RenderComponentSystem,
+    CameraComponentSystem,
+    LightComponentSystem,
+    ScriptComponentSystem
 ];
-createOptions.resourceHandlers = [pc.TextureHandler, pc.ContainerHandler, pc.ScriptHandler];
+createOptions.resourceHandlers = [TextureHandler, ContainerHandler, ScriptHandler];
 
-const app = new pc.AppBase(canvas);
+const app = new AppBase(canvas);
 app.init(createOptions);
 
-app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
-app.setCanvasResolution(pc.RESOLUTION_AUTO);
+app.setCanvasFillMode(FILLMODE_FILL_WINDOW);
+app.setCanvasResolution(RESOLUTION_AUTO);
 
 const resize = () => app.resizeCanvas();
 window.addEventListener('resize', resize);
@@ -50,7 +71,7 @@ app.on('destroy', () => {
 });
 
 await new Promise((resolve) => {
-    new pc.AssetListLoader(Object.values(assets), app.assets).load(resolve);
+    new AssetListLoader(Object.values(assets), app.assets).load(resolve);
 });
 
 app.start();
@@ -59,39 +80,51 @@ app.scene.skyboxMip = 1;
 app.scene.skyboxIntensity = 0.4;
 app.scene.envAtlas = assets.helipad.resource;
 
-const light = new pc.Entity();
+const light = new Entity();
 light.addComponent('light', {
     type: 'directional',
-    color: new pc.Color(1, 0.8, 0.25),
+    color: new Color(1, 0.8, 0.25),
     intensity: 2
 });
 light.setLocalEulerAngles(45, 30, 0);
 app.root.addChild(light);
 
+// the plane with its normal map, which is applied through a TBN matrix
 const entity = assets.model.resource.instantiateRenderEntity();
+entity.setLocalPosition(-1.1, 0, 0);
 app.root.addChild(entity);
 
-const camera = new pc.Entity();
+// the same plane without its normal map, which builds no TBN matrix and so is shaded with the
+// vertex normal
+const plain = assets.model.resource.instantiateRenderEntity();
+const plainMaterial = plain.render.meshInstances[0].material.clone();
+plainMaterial.normalMap = null;
+plainMaterial.update();
+plain.render.meshInstances[0].material = plainMaterial;
+plain.setLocalPosition(1.1, 0, 0);
+app.root.addChild(plain);
+
+const camera = new Entity();
 camera.addComponent('camera', {
-    toneMapping: pc.TONEMAP_ACES
+    toneMapping: TONEMAP_ACES
 });
 camera.addComponent('script');
 camera.setPosition(0, 2, 6);
 app.root.addChild(camera);
 
 const cc = /** @type {CameraControls} */ (camera.script.create(CameraControls));
-cc.focusPoint = new pc.Vec3(0, 0, 0);
+cc.focusPoint = new Vec3(0, 0, 0);
 
-const lightMaterial = new pc.StandardMaterial();
-lightMaterial.emissive = pc.Color.WHITE;
-lightMaterial.diffuse = pc.Color.BLACK;
+const lightMaterial = new StandardMaterial();
+lightMaterial.emissive = Color.WHITE;
+lightMaterial.diffuse = Color.BLACK;
 lightMaterial.useLighting = false;
 lightMaterial.update();
 
-const omniLight = new pc.Entity();
+const omniLight = new Entity();
 omniLight.addComponent('light', {
     type: 'omni',
-    color: new pc.Color(1, 1, 1),
+    color: new Color(1, 1, 1),
     intensity: 4,
     range: 10,
     castShadows: false
@@ -109,9 +142,5 @@ const orbitRadius = 2;
 let time = 0;
 app.on('update', (dt) => {
     time += dt * 0.5;
-    omniLight.setPosition(
-        Math.cos(time) * orbitRadius,
-        Math.sin(time) * orbitRadius,
-        0
-    );
+    omniLight.setPosition(Math.cos(time) * orbitRadius, Math.sin(time) * orbitRadius, 0);
 });

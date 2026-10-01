@@ -8,6 +8,13 @@ import {
  * as their source (from) state. If so and the AnimTransitions parameter based conditions are met,
  * the controller will transition to the destination state.
  *
+ * Each condition compares a parameter with a value using one of the predicates such as
+ * {@link ANIM_GREATER_THAN} or {@link ANIM_EQUAL_TO}. `time` is the blend duration,
+ * `exitTime` restricts the transition to a point in the source state's playback,
+ * `priority` orders transitions whose conditions pass together, and
+ * `interruptionSource` says which other transitions may cut this one short. A transition
+ * may also start from the {@link ANIM_STATE_ANY} state so that it applies from every state.
+ *
  * @category Animation
  */
 class AnimTransition {
@@ -31,7 +38,7 @@ class AnimTransition {
      * and must be between 0 and 1. Defaults to null.
      * @param {string} [options.interruptionSource] - Defines whether another transition can
      * interrupt this one and which of the current or previous states transitions can do so. One of
-     * pc.ANIM_INTERRUPTION_*. Defaults to pc.ANIM_INTERRUPTION_NONE.
+     * ANIM_INTERRUPTION_*. Defaults to ANIM_INTERRUPTION_NONE.
      */
     constructor({ from, to, time = 0, priority = 0, conditions = [], exitTime = null, transitionOffset = null, interruptionSource = ANIM_INTERRUPTION_NONE }) {
         this._from = from;

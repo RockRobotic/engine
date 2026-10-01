@@ -7,7 +7,7 @@ import {
     SliderInput
 } from '@playcanvas/pcui/react';
 
-import * as pc from 'playcanvas';
+import { SSAOTYPE_COMBINE, SSAOTYPE_LIGHTING, SSAOTYPE_NONE } from 'playcanvas';
 
 /**
  * @import { Observer } from '@playcanvas/observer'
@@ -35,9 +35,9 @@ export function Controls({ observer }) {
                         link={{ observer, path: 'data.ssao.type' }}
                         type='string'
                         options={[
-                            { v: pc.SSAOTYPE_NONE, t: 'None' },
-                            { v: pc.SSAOTYPE_LIGHTING, t: 'Lighting' },
-                            { v: pc.SSAOTYPE_COMBINE, t: 'Combine' }
+                            { v: SSAOTYPE_NONE, t: 'None' },
+                            { v: SSAOTYPE_LIGHTING, t: 'Lighting' },
+                            { v: SSAOTYPE_COMBINE, t: 'Combine' }
                         ]}
                     />
                 </LabelGroup>
@@ -99,7 +99,8 @@ export function Controls({ observer }) {
                         options={[
                             { v: 1.0, t: '100%' },
                             { v: 0.75, t: '75%' },
-                            { v: 0.5, t: '50%' }
+                            { v: 0.5, t: '50%' },
+                            { v: 0.25, t: '25%' }
                         ]}
                     />
                 </LabelGroup>

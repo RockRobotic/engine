@@ -9,6 +9,7 @@ import halfTypes from './shader-chunks/frag/half-types.js';
 
 /**
  * @import { BindGroupFormat } from './bind-group-format.js'
+ * @import { TRANSFORM_FEEDBACK_INTERLEAVED, TRANSFORM_FEEDBACK_SEPARATE } from './constants.js'
  * @import { GraphicsDevice } from './graphics-device.js'
  * @import { UniformBufferFormat } from './uniform-buffer-format.js'
  */
@@ -35,12 +36,43 @@ class Shader {
     meshUniformBufferFormat;
 
     /**
+     * True when the mesh uniform buffer holds no uniforms of the shader, only a placeholder, as
+     * WebGPU requires the buffer bound. Its draws can share one buffer, bound once per pass.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    meshUniformBufferEmpty = false;
+
+    /**
      * Format of the bind group for the mesh bind group.
      *
      * @type {BindGroupFormat}
      * @ignore
      */
     meshBindGroupFormat;
+
+    /**
+     * Format of the view bind group when the shader reads textures the renderer supplies per pass
+     * in it, following the view uniform buffer, or null when the group holds only the view uniform
+     * buffer. The format is shared by all shaders reading the same textures, and is not owned by
+     * the shader.
+     *
+     * @type {BindGroupFormat|null}
+     * @ignore
+     */
+    viewBindGroupFormat = null;
+
+    /**
+     * True when the vertex shader reads the model and normal matrices of the mesh instance from the
+     * mesh instance storage of the device, see {@link GraphicsDevice#meshInstanceStorage}, indexed
+     * by the instance index. The draws of such a shader pass the slot of the mesh instance as the
+     * first instance.
+     *
+     * @type {boolean}
+     * @ignore
+     */
+    usesMeshInstanceStorage = false;
 
     /**
      * The attributes that this shader code uses. The location is the key, the value is the name.
@@ -50,6 +82,17 @@ class Shader {
      * @ignore
      */
     attributes = new Map();
+
+    // #if _DEBUG
+    /**
+     * Set by the shadow renderer once it has checked whether the shader reads the normal matrix,
+     * which the shadow pass does not supply. Debug builds only.
+     *
+     * @type {boolean}
+     * @private
+     */
+    _debugNormalMatrixChecked = false;
+    // #endif
 
     /**
      * Creates a new Shader instance.
@@ -67,6 +110,11 @@ class Shader {
      * @param {string[]} [definition.feedbackVaryings] - A list of shader output variable
      * names that will be captured when using transform feedback. This setting is only effective
      * if the useTransformFeedback property is enabled.
+     * @param {number} [definition.feedbackVaryingsMode] - Specifies how transform feedback varyings
+     * are written into GPU buffers. Use {@link TRANSFORM_FEEDBACK_INTERLEAVED} to pack all captured
+     * varyings into a single buffer, or {@link TRANSFORM_FEEDBACK_SEPARATE} to store each varying
+     * in its own buffer. This setting is only effective when useTransformFeedback property is enabled.
+     * Defaults to {@link TRANSFORM_FEEDBACK_INTERLEAVED}.
      * @param {string} [definition.vshader] - Vertex shader source (GLSL code). Optional when
      * compute shader is specified.
      * @param {string} [definition.fshader] - Fragment shader source (GLSL code). Optional when
@@ -75,6 +123,10 @@ class Shader {
      * WebGPU platform.
      * @param {string} [definition.computeEntryPoint] - The entry point function name for the compute
      * shader. Defaults to 'main'.
+     * @param {BindGroupFormat} [definition.computeBindGroupFormat] - The bind group format for
+     * caller-provided compute resources in group 0. Only used on WebGPU.
+     * @param {Object<string, UniformBufferFormat>} [definition.computeUniformBufferFormats] - The
+     * uniform buffer formats keyed by bind group entry name. Requires computeBindGroupFormat.
      * @param {Map<string, string>} [definition.vincludes] - A map containing key-value pairs of
      * include names and their content. These are used for resolving #include directives in the
      * vertex shader source.
@@ -91,6 +143,8 @@ class Shader {
      * @param {string | string[]} [definition.fragmentOutputTypes] - Fragment shader output types,
      * which default to vec4. Passing a string will set the output type for all color attachments.
      * Passing an array will set the output type for each color attachment.
+     * @param {boolean} [definition.useDualSourceBlending] - Whether the fragment shader outputs a
+     * secondary color for dual-source blending. Defaults to false.
      * @param {string} [definition.shaderLanguage] - Specifies the shader language of vertex and
      * fragment shaders. Defaults to {@link SHADERLANGUAGE_GLSL}.
      * @example
@@ -116,17 +170,23 @@ class Shader {
      *
      * const shaderDefinition = {
      *     attributes: {
-     *         aPosition: pc.SEMANTIC_POSITION
+     *         aPosition: SEMANTIC_POSITION
      *     },
      *     vshader,
      *     fshader
      * };
      *
-     * const shader = new pc.Shader(graphicsDevice, shaderDefinition);
+     * const shader = new Shader(graphicsDevice, shaderDefinition);
      */
     constructor(graphicsDevice, definition) {
         this.id = id++;
         this.device = graphicsDevice;
+
+        // shallow copy the definition, as the code below replaces the shader sources with their
+        // pre-processed versions and may add extracted attributes. The object supplied by the
+        // caller must not be modified.
+        definition = { ...definition };
+
         this.definition = definition;
         this.name = definition.name || 'Untitled';
         this.init();
@@ -146,8 +206,9 @@ class Shader {
 
             const cshader = enablesCode + definesCode + definition.cshader;
 
-            // Add built-in halfTypesCS include for compute shaders (if not already provided by user)
-            const cincludes = definition.cincludes ?? new Map();
+            // Add built-in halfTypesCS include for compute shaders (if not already provided by
+            // user). Note this copies the supplied map, which must not be modified.
+            const cincludes = new Map(definition.cincludes);
             if (!cincludes.has('halfTypesCS')) {
                 cincludes.set('halfTypesCS', halfTypes);
             }
@@ -202,6 +263,9 @@ class Shader {
 
         this.impl = graphicsDevice.createShaderImpl(this);
 
+        // add it to the device list of all shaders
+        graphicsDevice.shaders.push(this);
+
         Debug.trace(TRACEID_SHADER_ALLOC, `Alloc: ${this.label}, stack: ${DebugGraphics.toString()}`, {
             instance: this
         });
@@ -222,13 +286,31 @@ class Shader {
         return `Shader Id ${this.id} (${this.definition.shaderLanguage === SHADERLANGUAGE_WGSL ? 'WGSL' : 'GLSL'}) ${this.name}`;
     }
 
+    // #if _DEBUG
+    /**
+     * Whether the shader reads a uniform, for debug validation. On WebGL the active uniforms of the
+     * linked program, from which the driver strips the unused ones. On WebGPU the uniforms the
+     * shader declares, as WGSL is not reflected. Debug builds only.
+     *
+     * @param {string} name - The name of the uniform.
+     * @returns {boolean|null} Whether the shader reads the uniform, or null when that is not known,
+     * before the shader is ready or on a device without shader reflection.
+     * @ignore
+     */
+    debugReadsUniform(name) {
+        return this.ready ? (this.impl.debugReadsUniform?.(this, name) ?? null) : null;
+    }
+    // #endif
+
     /**
      * Frees resources associated with this shader.
      */
     destroy() {
         Debug.trace(TRACEID_SHADER_ALLOC, `DeAlloc: Id ${this.id} ${this.name}`);
         this.device.onDestroyShader(this);
-        this.impl.destroy(this);
+
+        // a shader that failed to preprocess has no implementation
+        this.impl?.destroy(this);
     }
 
     /**

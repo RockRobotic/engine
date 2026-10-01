@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 
 import { Color } from '../../../../src/core/math/color.js';
+import { Vec2 } from '../../../../src/core/math/vec2.js';
 import { Vec4 } from '../../../../src/core/math/vec4.js';
 import { Entity } from '../../../../src/framework/entity.js';
 import {
@@ -10,6 +11,7 @@ import {
     LAYERID_UI,
     PROJECTION_ORTHOGRAPHIC,
     PROJECTION_PERSPECTIVE,
+    SHADER_FORWARD,
     TONEMAP_ACES
 } from '../../../../src/scene/constants.js';
 import { FogParams } from '../../../../src/scene/fog-params.js';
@@ -47,6 +49,14 @@ describe('CameraComponent', function () {
             expect(e.camera.orthoHeight).to.equal(10);
             expect(e.camera.priority).to.equal(0);
             expect(e.camera.projection).to.equal(PROJECTION_PERSPECTIVE);
+            expect(e.camera.projectionOffset.equals(new Vec2(0, 0))).to.equal(true);
+        });
+
+        it('accepts an array-literal projectionOffset', function () {
+            const e = new Entity();
+            e.addComponent('camera', { projectionOffset: [0.1, 0.2] });
+
+            expect(e.camera.projectionOffset.equals(new Vec2(0.1, 0.2))).to.equal(true);
         });
 
     });
@@ -85,6 +95,7 @@ describe('CameraComponent', function () {
                 orthoHeight: 7,
                 priority: 3,
                 projection: PROJECTION_ORTHOGRAPHIC,
+                projectionOffset: new Vec2(0.1, -0.2),
                 rect: new Vec4(0.1, 0.1, 0.5, 0.5),
                 scissorRect: new Vec4(0.2, 0.2, 0.6, 0.6),
                 aperture: 8,
@@ -93,6 +104,9 @@ describe('CameraComponent', function () {
                 gammaCorrection: GAMMA_NONE,
                 toneMapping: TONEMAP_ACES
             });
+
+            // per-attachment clear colors are script API only, not addComponent options
+            e.camera.setClearColor(1, new Color(0.5, 0.6, 0.7, 0.8));
 
             const clone = e.clone();
             const c = clone.camera;
@@ -104,6 +118,9 @@ describe('CameraComponent', function () {
             expect(c.calculateProjection).to.equal(calculateProjection);
             expect(c.calculateTransform).to.equal(calculateTransform);
             expect(c.clearColor.equals(new Color(0.1, 0.2, 0.3, 0.4))).to.equal(true);
+            expect(c.getClearColor(1).equals(new Color(0.5, 0.6, 0.7, 0.8))).to.equal(true);
+            expect(c.getClearColor(1)).to.not.equal(e.camera.getClearColor(1));
+            expect(c.getClearColor(2)).to.equal(c.clearColor);
             expect(c.clearColorBuffer).to.equal(false);
             expect(c.clearDepth).to.equal(0.5);
             expect(c.clearDepthBuffer).to.equal(false);
@@ -120,6 +137,7 @@ describe('CameraComponent', function () {
             expect(c.orthoHeight).to.equal(7);
             expect(c.priority).to.equal(3);
             expect(c.projection).to.equal(PROJECTION_ORTHOGRAPHIC);
+            expect(c.projectionOffset.equals(new Vec2(0.1, -0.2))).to.equal(true);
             expect(c.rect.equals(new Vec4(0.1, 0.1, 0.5, 0.5))).to.equal(true);
             expect(c.scissorRect.equals(new Vec4(0.2, 0.2, 0.6, 0.6))).to.equal(true);
             expect(c.aperture).to.equal(8);
@@ -136,6 +154,29 @@ describe('CameraComponent', function () {
             const clone = e.clone();
 
             expect(clone.camera.enabled).to.equal(false);
+        });
+
+    });
+
+    describe('#setShaderPass', function () {
+
+        it('returns the index of a named pass and reports its name', function () {
+            const e = new Entity();
+            e.addComponent('camera');
+
+            const index = e.camera.setShaderPass('custom_rendering');
+
+            expect(index).to.be.a('number');
+            expect(e.camera.getShaderPass()).to.equal('custom_rendering');
+        });
+
+        it('returns to the forward pass when called without a name', function () {
+            const e = new Entity();
+            e.addComponent('camera');
+            e.camera.setShaderPass('custom_rendering');
+
+            expect(e.camera.setShaderPass()).to.equal(SHADER_FORWARD);
+            expect(e.camera.getShaderPass()).to.equal(undefined);
         });
 
     });

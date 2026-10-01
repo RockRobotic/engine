@@ -122,6 +122,13 @@ fn evaluateLight{i}(
             var shadow: f32 = getShadow{i}(lightDirW);
         #endif
 
+        #ifdef LIGHT{i}_SHADOW_CASCADE_BLEND
+            // Fade to fully lit at the shadow distance without sampling another cascade.
+            let shadowDistance: f32 = uniform.light{i}_shadowCascadeDistances.w;
+            let shadowFade: f32 = smoothstep(uniform.light{i}_shadowCascadeBlend * shadowDistance, shadowDistance, 1.0 / pcPosition.w);
+            shadow = mix(shadow, 1.0, shadowFade);
+        #endif
+
         // Apply shadow intensity to the shadow value
         shadow = mix(1.0, shadow, uniform.light{i}_shadowIntensity);
 
@@ -132,6 +139,13 @@ fn evaluateLight{i}(
             dShadowCatcher = dShadowCatcher * shadow;
         #endif            
 
+    #endif
+
+    // Relief self shadowing, which is a property of the surface rather than of the light, so it
+    // applies whether or not the light casts a shadow map. Directional lights only for now: they are
+    // never clustered, so a pixel sees at most a handful of them and the cost stays bounded.
+    #if defined(STD_PARALLAX_SELF_SHADOW) && LIGHT{i}TYPE == DIRECTIONAL
+        dAtten = dAtten * getParallaxSelfShadow(dLightDirNormW);
     #endif
 
     #if LIGHT{i}SHAPE != PUNCTUAL

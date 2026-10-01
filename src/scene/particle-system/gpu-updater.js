@@ -135,7 +135,8 @@ class ParticleGPUUpdater {
             emitter.swapTex ? emitter.rtParticleTexIN : emitter.rtParticleTexOUT,
             !isOnStop ?
                 (emitter.loop ? emitter.shaderParticleUpdateRespawn : emitter.shaderParticleUpdateNoRespawn) :
-                emitter.shaderParticleUpdateOnStop);
+                emitter.shaderParticleUpdateOnStop,
+            undefined, undefined, 'ParticleUpdate');
 
         // this.constantParticleTexOUT.setValue(texOUT);
 
@@ -144,9 +145,6 @@ class ParticleGPUUpdater {
         emitter.beenReset = false;
 
         emitter.swapTex = !emitter.swapTex;
-
-        emitter.prevWorldBoundsSize.copy(emitter.worldBoundsSize);
-        emitter.prevWorldBoundsCenter.copy(emitter.worldBounds.center);
 
         DebugGraphics.popGpuMarker(device);
     }

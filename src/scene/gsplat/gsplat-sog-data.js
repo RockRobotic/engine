@@ -13,7 +13,7 @@ import {
     SEMANTIC_POSITION
 } from '../../platform/graphics/constants.js';
 import { QuadRender } from '../../scene/graphics/quad-render.js';
-import { RenderPassQuad } from '../../scene/graphics/render-pass-quad.js';
+import { RenderPassShaderQuad } from '../../scene/graphics/render-pass-shader-quad.js';
 import { ShaderUtils } from '../shader-lib/shader-utils.js';
 import glslSogCentersPS from '../shader-lib/glsl/chunks/gsplat/frag/gsplatSogCenters.js';
 import wgslSogCentersPS from '../shader-lib/wgsl/chunks/gsplat/frag/gsplatSogCenters.js';
@@ -191,6 +191,14 @@ class GSplatSogData {
      */
     _centers = null;
 
+    /**
+     * Recovery waits that must also finish if this data is destroyed before the device recovers.
+     *
+     * @type {Set<() => void> | null}
+     * @private
+     */
+    _pendingRestoreWaits = null;
+
     // Marked when resource is destroyed, to abort any in-flight async preparation
     destroyed = false;
 
@@ -220,6 +228,7 @@ class GSplatSogData {
 
     destroy() {
         this.destroyed = true;
+        this._pendingRestoreWaits?.forEach(finish => finish());
         this._destroyGpuResources();
     }
 
@@ -398,7 +407,8 @@ class GSplatSogData {
         });
 
         const quad = new QuadRender(shader);
-        const renderPass = new RenderPassQuad(device, quad);
+        const renderPass = new RenderPassShaderQuad(device);
+        renderPass.quadRender = quad;
         renderPass.name = 'SogGenerateCenters';
         renderPass.init(renderTarget);
         renderPass.colorOps.clear = false;
@@ -408,22 +418,24 @@ class GSplatSogData {
 
         renderTarget.destroy();
 
-        const u32 = await readImageDataAsync(centersTexture);
-        if (this.destroyed || device._destroyed) {
-            centersTexture.destroy();
-            return;
-        }
+        try {
+            const u32 = await readImageDataAsync(centersTexture);
+            if (this.destroyed || device._destroyed) {
+                return;
+            }
 
-        const asFloat = new Float32Array(u32.buffer);
-        const result = new Float32Array(this.numSplats * 3);
-        for (let i = 0; i < this.numSplats; i++) {
-            const base = i * 4;
-            result[i * 3 + 0] = asFloat[base + 0];
-            result[i * 3 + 1] = asFloat[base + 1];
-            result[i * 3 + 2] = asFloat[base + 2];
+            const asFloat = new Float32Array(u32.buffer);
+            const result = new Float32Array(this.numSplats * 3);
+            for (let i = 0; i < this.numSplats; i++) {
+                const base = i * 4;
+                result[i * 3 + 0] = asFloat[base + 0];
+                result[i * 3 + 1] = asFloat[base + 1];
+                result[i * 3 + 2] = asFloat[base + 2];
+            }
+            this._centers = result;
+        } finally {
+            centersTexture.destroy();
         }
-        this._centers = result;
-        centersTexture.destroy();
     }
 
     /**
@@ -506,7 +518,43 @@ class GSplatSogData {
     async prepareGpuData() {
         const device = this.means_l?.device;
         if (this.destroyed || !device || device._destroyed) return;
-        await this.generateCenters();
+
+        // Texture downloads can finish while rendering is paused for device recovery.
+        if (device.isContextLost()) {
+            await new Promise((resolve) => {
+                const waits = this._pendingRestoreWaits ??= new Set();
+                const finish = () => {
+                    device.off('devicerestored', finish);
+                    device.off('destroy', finish);
+                    waits.delete(finish);
+                    if (waits.size === 0) {
+                        this._pendingRestoreWaits = null;
+                    }
+                    resolve();
+                };
+                waits.add(finish);
+                device.once('devicerestored', finish);
+                device.once('destroy', finish);
+            });
+            return this.prepareGpuData();
+        }
+
+        // A readback may fail (WebGL) or return invalid data (WebGPU) when its device is lost.
+        // Remember the event even if recovery finishes before the readback settles.
+        let lost = false;
+        const onLost = device.once('devicelost', () => {
+            lost = true;
+        });
+        try {
+            await this.generateCenters();
+            if (!lost) return;
+        } catch (error) {
+            if (!lost && !this.destroyed && !device._destroyed && !device.isContextLost()) throw error;
+        } finally {
+            onLost.off();
+        }
+        this._centers = null;
+        return this.prepareGpuData();
     }
 }
 

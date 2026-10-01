@@ -7,11 +7,10 @@ import { getScriptRegistryName } from './script.js';
  * @import { AppBase } from '../app-base.js'
  * @import { AttributeSchema } from './script-attributes.js'
  * @import { Script } from './script.js'
- * @import { ScriptType } from './script-type.js'
  */
 
 /**
- * Container for all {@link ScriptType}s that are available to this application. Note that
+ * Container for all {@link Script} classes that are available to this application. Note that
  * PlayCanvas scripts can access the Script Registry from inside the application with
  * {@link AppBase#scripts}.
  *
@@ -23,13 +22,13 @@ class ScriptRegistry extends EventHandler {
      * script names which collide with `Object.prototype` members - e.g. `hasOwnProperty`,
      * `toString`, `__proto__` - are stored and looked up safely.
      *
-     * @type {Map<string, typeof ScriptType>}
+     * @type {Map<string, typeof Script>}
      * @private
      */
     _scripts = new Map();
 
     /**
-     * @type {typeof ScriptType[]}
+     * @type {typeof Script[]}
      * @private
      */
     _list = [];
@@ -89,17 +88,17 @@ class ScriptRegistry extends EventHandler {
      * If a script with the same name already exists in the registry, and the new script has a
      * `swap` method defined, it will perform code hot swapping automatically in an async manner.
      *
-     * @param {typeof Script | typeof ScriptType} script - The script class to add. Must have a
+     * @param {typeof Script} script - The script class to add. Must have a
      * resolvable name (a static `scriptName`, an assigned `__name`, or an inferable class name).
      * @returns {boolean} True if the script was added for the first time. False if a script with
      * the same name already exists, or if the script has no resolvable name.
      * @example
-     * var PlayerController = pc.createScript('playerController');
-     * // playerController Script Type will be added to pc.ScriptRegistry automatically
+     * var PlayerController = createScript('playerController');
+     * // playerController Script Type will be added to ScriptRegistry automatically
      * console.log(app.scripts.has('playerController')); // outputs true
      * @example
      * // engine-only: register an ESM Script class manually
-     * class Rotator extends pc.Script {
+     * class Rotator extends Script {
      *     static scriptName = 'rotator';
      * }
      * app.scripts.add(Rotator);
@@ -170,22 +169,23 @@ class ScriptRegistry extends EventHandler {
             }
 
             const components = this.app.systems.script._components;
-            let attributes;
             const scriptInstances = [];
             const scriptInstancesInitialized = [];
 
             for (components.loopIndex = 0; components.loopIndex < components.length; components.loopIndex++) {
                 const component = components.items[components.loopIndex];
                 // check if awaiting for script
-                if (component._scriptsIndex[scriptName] && component._scriptsIndex[scriptName].awaiting) {
-                    if (component._scriptsData && component._scriptsData[scriptName]) {
-                        attributes = component._scriptsData[scriptName].attributes;
-                    }
+                const indexData = component._scriptsIndex[scriptName];
+                if (indexData && indexData.awaiting) {
 
+                    // the awaiting entry holds what this component asked for, which is both
+                    // per component and specific to the declaration that is still standing
                     const scriptInstance = component.create(scriptName, {
                         preloading: true,
-                        ind: component._scriptsIndex[scriptName].ind,
-                        attributes: attributes
+                        ind: component._awaitingInsertIndex(scriptName),
+                        enabled: indexData.enabled,
+                        attributes: indexData.attributes,
+                        properties: indexData.properties
                     });
 
                     if (scriptInstance) {
@@ -230,10 +230,9 @@ class ScriptRegistry extends EventHandler {
     }
 
     /**
-     * Remove {@link ScriptType}.
+     * Remove a {@link Script} class from the registry.
      *
-     * @param {string|typeof ScriptType} nameOrType - The name or type
-     * of {@link ScriptType}.
+     * @param {string|typeof Script} nameOrType - The name or class of the {@link Script}.
      * @returns {boolean} True if removed or False if already not in registry.
      * @example
      * app.scripts.remove('playerController');
@@ -263,11 +262,11 @@ class ScriptRegistry extends EventHandler {
     }
 
     /**
-     * Get {@link ScriptType} by name.
+     * Get a {@link Script} class by name.
      *
-     * @param {string} name - Name of a {@link ScriptType}.
-     * @returns {typeof ScriptType} The Script Type if it exists in the
-     * registry or null otherwise.
+     * @param {string} name - Name of the {@link Script}.
+     * @returns {typeof Script|null} The script class if it exists in the registry or null
+     * otherwise.
      * @example
      * var PlayerController = app.scripts.get('playerController');
      */
@@ -276,14 +275,13 @@ class ScriptRegistry extends EventHandler {
     }
 
     /**
-     * Check if a {@link ScriptType} with the specified name is in the registry.
+     * Check if a {@link Script} class with the specified name is in the registry.
      *
-     * @param {string|typeof ScriptType} nameOrType - The name or type
-     * of {@link ScriptType}.
-     * @returns {boolean} True if {@link ScriptType} is in registry.
+     * @param {string|typeof Script} nameOrType - The name or class of the {@link Script}.
+     * @returns {boolean} True if the {@link Script} class is in the registry.
      * @example
      * if (app.scripts.has('playerController')) {
-     *     // playerController is in pc.ScriptRegistry
+     *     // playerController is in ScriptRegistry
      * }
      */
     has(nameOrType) {
@@ -297,10 +295,9 @@ class ScriptRegistry extends EventHandler {
     }
 
     /**
-     * Get list of all {@link ScriptType}s from registry.
+     * Get list of all {@link Script} classes from registry.
      *
-     * @returns {Array<typeof ScriptType>} list of all {@link ScriptType}s
-     * in registry.
+     * @returns {Array<typeof Script>} list of all {@link Script} classes in registry.
      * @example
      * // logs array of all Script Type names available in registry
      * console.log(app.scripts.list().map(function (o) {

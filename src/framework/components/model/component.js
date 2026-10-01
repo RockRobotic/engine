@@ -33,7 +33,7 @@ import { Component } from '../component.js';
  * to an Entity, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('model', {
  *     type: 'box'
  * });
@@ -814,13 +814,20 @@ class ModelComponent extends Component {
     }
 
     onBeforeRemove() {
+        // removing a component does not disable it first, so undo what onEnable set up
+        if (this.enabled && this.entity.enabled) {
+            this.onDisable();
+        }
+
         this.asset = null;
         this.model = null;
         this.materialAsset = null;
         this._unsetMaterialEvents();
 
         this.entity.off('remove', this.onRemoveChild, this);
+        this.entity.off('removehierarchy', this.onRemoveChild, this);
         this.entity.off('insert', this.onInsertChild, this);
+        this.entity.off('inserthierarchy', this.onInsertChild, this);
     }
 
     /**
@@ -830,10 +837,12 @@ class ModelComponent extends Component {
      */
     onLayersChanged(oldComp, newComp) {
         this.addModelToLayers();
-        oldComp.off('add', this.onLayerAdded, this);
-        oldComp.off('remove', this.onLayerRemoved, this);
-        newComp.on('add', this.onLayerAdded, this);
-        newComp.on('remove', this.onLayerRemoved, this);
+
+        // store the new handles, so that onDisable can unsubscribe from the current composition
+        this._evtLayerAdded?.off();
+        this._evtLayerAdded = newComp.on('add', this.onLayerAdded, this);
+        this._evtLayerRemoved?.off();
+        this._evtLayerRemoved = newComp.on('remove', this.onLayerRemoved, this);
     }
 
     /**
@@ -949,7 +958,7 @@ class ModelComponent extends Component {
         }
 
         if (materialAsset.resource) {
-            meshInstance.material = materialAsset.resource;
+            meshInstance.material = /** @type {Material} */ (materialAsset.resource);
 
             this._setMaterialEvent(index, 'remove', materialAsset.id, function () {
                 meshInstance.material = this.system.defaultMaterial;
@@ -1137,7 +1146,7 @@ class ModelComponent extends Component {
      * @private
      */
     _onMaterialAssetLoad(asset) {
-        this._setMaterial(asset.resource);
+        this._setMaterial(/** @type {Material} */ (asset.resource));
     }
 
     /**
@@ -1212,7 +1221,7 @@ class ModelComponent extends Component {
      * @private
      */
     _onModelAssetLoad(asset) {
-        this.model = asset.resource.clone();
+        this.model = /** @type {Model} */ (asset.resource).clone();
         this._clonedModel = true;
     }
 
@@ -1263,6 +1272,18 @@ class ModelComponent extends Component {
                 meshInstances[i].material = material;
             }
         }
+    }
+
+    /**
+     * Sets the visibility of the model.
+     *
+     * @param {boolean} visible - True to enable the model.
+     * @ignore
+     * @deprecated Use {@link ModelComponent#enabled} instead.
+     */
+    setVisible(visible) {
+        Debug.deprecated('ModelComponent#setVisible is deprecated. Use ModelComponent#enabled instead.');
+        this.enabled = visible;
     }
 }
 

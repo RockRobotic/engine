@@ -1,169 +1,225 @@
-import * as pc from 'playcanvas';
+// @config
+//
+// A party chat with emoji. A font asset holds one color per glyph, so the messages use a
+// **CanvasFont**, which draws characters with the browser's fonts into textures, emoji included.
+// Characters it hasn't drawn yet are added with `updateTextures`: try the reactions.
 
+import {
+    AppBase,
+    AppOptions,
+    Asset,
+    AssetListLoader,
+    ButtonComponentSystem,
+    CameraComponentSystem,
+    CanvasFont,
+    Color,
+    ELEMENTTYPE_IMAGE,
+    ELEMENTTYPE_TEXT,
+    ElementComponentSystem,
+    ElementInput,
+    Entity,
+    FILLMODE_FILL_WINDOW,
+    FontHandler,
+    RESOLUTION_AUTO,
+    SCALEMODE_BLEND,
+    SPRITE_RENDERMODE_SLICED,
+    ScreenComponentSystem,
+    Sprite,
+    TextureAtlasHandler,
+    TextureHandler,
+    Vec2,
+    createGraphicsDevice
+} from 'playcanvas';
+
+import { uiAtlasData } from 'examples/assets/ui/ui-atlas.mjs';
 import { deviceType } from 'examples/context';
 
 const canvas = /** @type {HTMLCanvasElement} */ (document.getElementById('application-canvas'));
 window.focus();
 
 const assets = {
-    font: new pc.Asset('font', 'font', { url: './assets/fonts/arial.json' })
+    bold: new Asset('bold', 'font', { url: './assets/fonts/roboto-bold.json' }),
+    ui: new Asset('ui', 'textureatlas', { url: './assets/ui/ui-atlas.png' }, uiAtlasData)
 };
 
-const gfxOptions = {
-    deviceTypes: [deviceType]
-};
-
-const device = await pc.createGraphicsDevice(canvas, gfxOptions);
+const device = await createGraphicsDevice(canvas, { deviceTypes: [deviceType] });
 device.maxPixelRatio = Math.min(window.devicePixelRatio, 2);
 
-const createOptions = new pc.AppOptions();
+const createOptions = new AppOptions();
 createOptions.graphicsDevice = device;
-createOptions.mouse = new pc.Mouse(document.body);
-createOptions.touch = new pc.TouchDevice(document.body);
-createOptions.elementInput = new pc.ElementInput(canvas);
-
+createOptions.elementInput = new ElementInput(canvas);
 createOptions.componentSystems = [
-    pc.RenderComponentSystem,
-    pc.CameraComponentSystem,
-    pc.ScreenComponentSystem,
-    pc.ButtonComponentSystem,
-    pc.ElementComponentSystem,
-    pc.LayoutGroupComponentSystem,
-    pc.ScrollViewComponentSystem,
-    pc.ScrollbarComponentSystem,
-    pc.LayoutChildComponentSystem
+    CameraComponentSystem,
+    ScreenComponentSystem,
+    ElementComponentSystem,
+    ButtonComponentSystem
 ];
-createOptions.resourceHandlers = [pc.TextureHandler, pc.FontHandler];
+createOptions.resourceHandlers = [TextureHandler, TextureAtlasHandler, FontHandler];
 
-const app = new pc.AppBase(canvas);
+const app = new AppBase(canvas);
 app.init(createOptions);
 
-// Set the canvas to fill the window and automatically change resolution to be the same as the canvas size
-app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW);
-app.setCanvasResolution(pc.RESOLUTION_AUTO);
-
-// Ensure canvas is resized when window changes size
+// Fill the window, and keep the canvas resolution the same as its size
+app.setCanvasFillMode(FILLMODE_FILL_WINDOW);
+app.setCanvasResolution(RESOLUTION_AUTO);
 const resize = () => app.resizeCanvas();
 window.addEventListener('resize', resize);
-app.on('destroy', () => {
-    window.removeEventListener('resize', resize);
+app.on('destroy', () => window.removeEventListener('resize', resize));
+
+await new Promise((resolve) => {
+    new AssetListLoader(Object.values(assets), app.assets).load(resolve);
 });
 
-const assetListLoader = new pc.AssetListLoader(Object.values(assets), app.assets);
-assetListLoader.load(() => {
-    app.start();
+app.start();
 
-    // Create a camera
-    const camera = new pc.Entity();
-    camera.addComponent('camera', {
-        clearColor: new pc.Color(30 / 255, 30 / 255, 30 / 255)
-    });
-    app.root.addChild(camera);
+const camera = new Entity('camera');
+camera.addComponent('camera', { clearColor: new Color(0.1, 0.11, 0.13) });
+app.root.addChild(camera);
 
-    // Create a 2D screen
-    const screen = new pc.Entity();
-    screen.addComponent('screen', {
-        referenceResolution: new pc.Vec2(1280, 720),
-        scaleBlend: 0.5,
-        scaleMode: pc.SCALEMODE_BLEND,
-        screenSpace: true
-    });
-    app.root.addChild(screen);
+const screen = new Entity('screen');
+screen.addComponent('screen', {
+    screenSpace: true,
+    referenceResolution: [1280, 720],
+    scaleMode: SCALEMODE_BLEND,
+    scaleBlend: 0.5
+});
+app.root.addChild(screen);
 
-    // some sample text
-    const firstLineText = 'PlayCanvas supports Emojis via CanvasFont!';
-    const flagsText = 'Flags: 🇺🇸🇩🇪🇮🇪🇮🇹🏴‍☠️🇨🇦';
-    const complexText = 'Complex emoji: 👨🏿3️⃣👁️‍🗨️';
+// The font of the messages. It is a bitmap font, so it is created at least as large as the text
+// drawn with it, and the characters it needs are drawn into its textures before they are used
+const emojiFont = new CanvasFont(app, {
+    fontName: 'Arial',
+    fontSize: 64,
+    color: new Color(1, 1, 1),
+    width: 256,
+    height: 256
+});
+const messages = [
+    ['Aria', 'Well done! 🎉'],
+    ['Brom', 'That troll was huge 😱'],
+    ['Cai', 'GG everyone 👏🔥']
+];
+emojiFont.createTextures(messages.map(([, text]) => text).join(''));
+app.on('destroy', () => emojiFont.destroy());
 
-    // Create a canvas font asset
-    const size = 64;
-    const elSize = 32;
+const atlas = assets.ui.resource;
+const panel = new Sprite(device, {
+    atlas,
+    frameKeys: ['panel'],
+    pixelsPerUnit: 2,
+    renderMode: SPRITE_RENDERMODE_SLICED
+});
+const circle = new Sprite(device, { atlas, frameKeys: ['circle'] });
+app.on('destroy', () => [panel, circle].forEach((sprite) => sprite.destroy()));
 
-    const canvasFont = new pc.CanvasFont(app, {
-        color: new pc.Color(1, 1, 1), // white
-        fontName: 'Arial',
-        fontSize: size,
-        width: 256,
-        height: 256
-    });
-
-    // The first texture update needs to be `createTextures()`. Follow-up calls need to be `updateTextures()`.
-    canvasFont.createTextures(firstLineText);
-    canvasFont.updateTextures(flagsText);
-    canvasFont.updateTextures(complexText);
-
-    /**
-     * Create the text entities.
-     * @param {number} y - The y coordinate.
-     * @param {string} text - The element component's text.
-     */
-    function createText(y, text) {
-        const canvasElementEntity = new pc.Entity();
-        canvasElementEntity.setLocalPosition(0, y, 0);
-        canvasElementEntity.addComponent('element', {
-            pivot: new pc.Vec2(0.5, 0.5),
-            anchor: new pc.Vec4(0.5, 0.5, 0.5, 0.5),
-            fontSize: elSize,
-            text: text,
-            type: pc.ELEMENTTYPE_TEXT
-        });
-        canvasElementEntity.element.font = canvasFont;
-        screen.addChild(canvasElementEntity);
-    }
-    createText(225, firstLineText);
-    createText(150, flagsText);
-    createText(100, complexText);
-
-    // Canvas Fonts Debug - you shouldn't do this in your actual project
-    const debugText = new pc.Entity();
-    debugText.setLocalPosition(0, -50, 0);
-    debugText.addComponent('element', {
-        pivot: new pc.Vec2(0.5, 0.5),
-        anchor: new pc.Vec4(0.5, 0.5, 0.5, 0.5),
-        fontAsset: assets.font.id,
-        fontSize: elSize,
-        text: 'The following are the CanvasFont\'s Texture Atlases,\ncontaining all the rendered characters:',
-        type: pc.ELEMENTTYPE_TEXT
-    });
-    screen.addChild(debugText);
-
-    // Create Layout Group Entity
-    const group = new pc.Entity();
-    group.setLocalPosition(0, -150, 0);
-    group.addComponent('element', {
-        // a Layout Group needs a 'group' element component
-        type: pc.ELEMENTTYPE_GROUP,
+/**
+ * Create an element centered on its parent.
+ *
+ * @param {Entity} parent - The parent entity.
+ * @param {string} name - The entity name.
+ * @param {object} properties - Properties of the element component.
+ * @returns {Entity} The entity.
+ */
+const createElement = (parent, name, properties) => {
+    const entity = new Entity(name);
+    entity.addComponent('element', {
+        type: ELEMENTTYPE_IMAGE,
         anchor: [0.5, 0.5, 0.5, 0.5],
         pivot: [0.5, 0.5],
-        // the element's width and height dictate the group's bounds
-        width: 300,
-        height: 100
+        ...properties
     });
-    group.addComponent('layoutgroup', {
-        orientation: pc.ORIENTATION_HORIZONTAL,
-        // fit_both for width and height, making all child elements take the entire space
-        widthFitting: pc.FITTING_BOTH,
-        heightFitting: pc.FITTING_BOTH,
-        // wrap children
-        wrap: true
-    });
-    screen.addChild(group);
+    parent.addChild(entity);
+    return entity;
+};
 
-    // create 1 child per texture
-    for (let i = 0; i < canvasFont.textures.length; i++) {
-        const texture = canvasFont.textures[i];
-
-        // create a random-colored panel
-        const child = new pc.Entity();
-        child.addComponent('element', {
-            anchor: [0.5, 0.5, 0.5, 0.5],
-            pivot: [0.5, 0.5],
-            texture: texture,
-            type: pc.ELEMENTTYPE_IMAGE
-        });
-        child.addComponent('layoutchild', {
-            excludeFromLayout: false
-        });
-        group.addChild(child);
-    }
+const chat = createElement(screen, 'chat', {
+    sprite: panel,
+    color: new Color(0.16, 0.18, 0.23),
+    width: 560,
+    height: 440
 });
+chat.setLocalPosition(0, 40, 0);
+createElement(chat, 'heading', {
+    type: ELEMENTTYPE_TEXT,
+    fontAsset: assets.bold.id,
+    text: 'Party chat',
+    fontSize: 26,
+    color: new Color(0.6, 0.64, 0.72),
+    anchor: [0, 1, 0, 1],
+    pivot: [0, 1]
+}).setLocalPosition(28, -24, 0);
+
+const colors = { Aria: [0.5, 0.78, 1], Brom: [1, 0.6, 0.4], Cai: [0.6, 0.9, 0.5], You: [1, 0.8, 0.3] };
+const lines = [];
+
+/**
+ * Post a message: the sender's name in the font asset, and the message in the canvas font.
+ *
+ * @param {string} name - The sender.
+ * @param {string} text - The message.
+ */
+const post = (name, text) => {
+    const line = createElement(chat, `${name}: ${text}`, {
+        type: ELEMENTTYPE_TEXT,
+        anchor: [0, 1, 0, 1],
+        pivot: [0, 1]
+    });
+    line.element.font = emojiFont;
+    line.element.fontSize = 32;
+    line.element.text = text;
+    const sender = createElement(line, 'name', {
+        type: ELEMENTTYPE_TEXT,
+        fontAsset: assets.bold.id,
+        text: name,
+        fontSize: 22,
+        color: new Color(...colors[name]),
+        anchor: [0, 1, 0, 1],
+        pivot: [0, 0]
+    });
+    sender.setLocalPosition(0, 4, 0);
+
+    // keep the four latest messages
+    lines.push(line);
+    if (lines.length > 4) {
+        lines.shift().destroy();
+    }
+    lines.forEach((l, i) => l.setLocalPosition(28, -100 - i * 80, 0));
+};
+messages.forEach(([name, text]) => post(name, text));
+
+// Reactions post an emoji. They aren't in the messages above, so they are drawn into the font's
+// textures with updateTextures before the buttons use them
+const reactions = ['👍', '❤️', '😂', '🦄'];
+emojiFont.updateTextures(reactions.join(''));
+reactions.forEach((emoji, i) => {
+    const button = createElement(screen, emoji, {
+        sprite: circle,
+        color: new Color(0.2, 0.23, 0.29),
+        width: 76,
+        height: 76,
+        useInput: true
+    });
+    button.setLocalPosition((i - 1.5) * 96, -250, 0);
+    button.addComponent('button', {
+        imageEntity: button,
+        hoverTint: new Color(0.28, 0.32, 0.4),
+        pressedTint: new Color(0.14, 0.16, 0.2)
+    });
+    const label = createElement(button, 'emoji', { type: ELEMENTTYPE_TEXT, text: emoji });
+    label.element.font = emojiFont;
+    label.element.fontSize = 38;
+    label.element.text = emoji;
+    button.button.on('click', () => post('You', emoji));
+});
+
+// Use a portrait reference resolution on portrait canvases, and scale to whichever axis has
+// less room, so the chat stays on screen
+const layout = () => {
+    const portrait = device.height > device.width;
+    const reference = portrait ? new Vec2(540, 960) : new Vec2(1280, 720);
+    screen.screen.referenceResolution = reference;
+    screen.screen.scaleBlend = device.width / reference.x > device.height / reference.y ? 1 : 0;
+    chat.element.width = portrait ? 500 : 560;
+};
+device.on('resizecanvas', layout);
+layout();

@@ -1,20 +1,14 @@
 // #if _DEBUG
 import { version, revision } from '../core/core.js';
 // #endif
-import { platform } from '../core/platform.js';
 import { now } from '../core/time.js';
 import { path } from '../core/path.js';
 import { TRACEID_RENDER_FRAME, TRACEID_RENDER_FRAME_TIME } from '../core/constants.js';
 import { Debug } from '../core/debug.js';
 import { EventHandler } from '../core/event-handler.js';
-import { Color } from '../core/math/color.js';
-import { Mat4 } from '../core/math/mat4.js';
 import { math } from '../core/math/math.js';
-import { Quat } from '../core/math/quat.js';
-import { Vec3 } from '../core/math/vec3.js';
 
 import {
-    CULLFACE_NONE,
     SHADERLANGUAGE_GLSL,
     SHADERLANGUAGE_WGSL
 } from '../platform/graphics/constants.js';
@@ -33,7 +27,6 @@ import { AreaLightLuts } from '../scene/area-light-luts.js';
 import { Layer } from '../scene/layer.js';
 import { LayerComposition } from '../scene/composition/layer-composition.js';
 import { Scene } from '../scene/scene.js';
-import { ShaderMaterial } from '../scene/materials/shader-material.js';
 import { StandardMaterial } from '../scene/materials/standard-material.js';
 import { setDefaultMaterial } from '../scene/materials/default-material.js';
 
@@ -52,7 +45,7 @@ import { ScriptRegistry } from './script/script-registry.js';
 import { Entity } from './entity.js';
 import { SceneRegistry } from './scene-registry.js';
 import { script } from './script.js';
-import { ApplicationStats } from './stats.js';
+import { AppStats } from './app-stats.js';
 import { getApplication, setApplication } from './globals.js';
 import { shaderChunksGLSL } from '../scene/shader-lib/glsl/collections/shader-chunks-glsl.js';
 import { shaderChunksWGSL } from '../scene/shader-lib/wgsl/collections/shader-chunks-wgsl.js';
@@ -61,18 +54,16 @@ import { ShaderChunks } from '../scene/shader-lib/shader-chunks.js';
 /**
  * @import { AppOptions } from './app-options.js'
  * @import { BatchManager } from '../scene/batching/batch-manager.js'
+ * @import { Color } from '../core/math/color.js'
  * @import { ElementInput } from './input/element-input.js'
  * @import { GamePads } from '../platform/input/game-pads.js'
  * @import { GraphicsDevice } from '../platform/graphics/graphics-device.js'
  * @import { Keyboard } from '../platform/input/keyboard.js'
  * @import { Lightmapper } from './lightmapper/lightmapper.js'
- * @import { Material } from '../scene/materials/material.js'
- * @import { MeshInstance } from '../scene/mesh-instance.js'
- * @import { Mesh } from '../scene/mesh.js'
  * @import { Mouse } from '../platform/input/mouse.js'
  * @import { SoundManager } from '../platform/sound/manager.js'
- * @import { Texture } from '../platform/graphics/texture.js'
  * @import { TouchDevice } from '../platform/input/touch-device.js'
+ * @import { Vec3 } from '../core/math/vec3.js'
  * @import { XrManager } from './xr/xr-manager.js'
  */
 
@@ -99,6 +90,19 @@ import { ShaderChunks } from '../scene/shader-lib/shader-chunks.js';
 let app = null;
 
 /**
+ * The version of the contract under which an app announces itself to a devtools hook, defined on
+ * the global object under `Symbol.for('playcanvas.inspector')`. The hook's `register(app, info)` is
+ * called once an app is initialized, with its graphics device, scene, root entity and component
+ * systems in place, and `unregister(app)` as it is destroyed. An app created with
+ * {@link AppOptions#devtools} set to false does neither. The symbol is looked up at those two
+ * points only, not when the module loads, so the module stays free of side effects.
+ *
+ * @type {number}
+ * @ignore
+ */
+const DEVTOOLS_PROTOCOL = 1;
+
+/**
  * AppBase represents the base functionality for all PlayCanvas applications. It is responsible for
  * initializing and managing the application lifecycle. It coordinates core engine systems such
  * as:
@@ -114,6 +118,16 @@ let app = null;
  * {@link ResourceHandler}s yourself. This facilitates
  * [tree-shaking](https://developer.mozilla.org/en-US/docs/Glossary/Tree_shaking) when bundling
  * your application.
+ *
+ * It is the preferred entry point for new code - {@link Application} is a convenience subclass
+ * that registers everything for you, and is expected to be deprecated in a future release.
+ *
+ * `new AppBase(canvas)` only constructs the instance and its root entity. You must then call
+ * {@link AppBase#init} with an {@link AppOptions} supplying at minimum `graphicsDevice`,
+ * `componentSystems` and `resourceHandlers` before adding components or calling
+ * {@link AppBase#start}. Create the `graphicsDevice` with {@link createGraphicsDevice}.
+ *
+ * @category Framework
  */
 class AppBase extends EventHandler {
     /**
@@ -129,6 +143,13 @@ class AppBase extends EventHandler {
 
     /** @private */
     _inFrameUpdate = false;
+
+    /**
+     * Whether the app announced itself to a devtools hook, and so withdraws on destroy.
+     *
+     * @private
+     */
+    _devtoolsRegistered = false;
 
     /** @private */
     _librariesLoaded = false;
@@ -277,7 +298,9 @@ class AppBase extends EventHandler {
     };
 
     /**
-     * Scales the global time delta. Defaults to 1.
+     * Scales the global time delta. Defaults to 1. Scripts, animation and physics all receive
+     * the scaled delta, so 0 stops them together. To pause or slow down physics alone while the
+     * rest of the application keeps running, use {@link RigidBodyComponentSystem#timeScale}.
      *
      * @example
      * // Set the app to run at half speed
@@ -328,12 +351,10 @@ class AppBase extends EventHandler {
     scriptsOrder = [];
 
     /**
-     * The application's performance stats.
-     *
-     * @type {ApplicationStats}
-     * @ignore
+     * @type {AppStats}
+     * @private
      */
-    stats;
+    _stats;
 
     /**
      * When true, the application's render function is called every frame. Setting autoRender to
@@ -356,7 +377,7 @@ class AppBase extends EventHandler {
      *
      * @example
      * // Render the scene only while space key is pressed
-     * if (this.app.keyboard.isPressed(pc.KEY_SPACE)) {
+     * if (this.app.keyboard.isPressed(KEY_SPACE)) {
      *     this.app.renderNextFrame = true;
      * }
      */
@@ -385,7 +406,7 @@ class AppBase extends EventHandler {
      * @type {Scene}
      * @example
      * // Set the fog type property of the application's scene
-     * this.app.scene.fog.type = pc.FOG_LINEAR;
+     * this.app.scene.fog.type = FOG_LINEAR;
      */
     scene;
 
@@ -502,7 +523,7 @@ class AppBase extends EventHandler {
      * @type {XrManager|null}
      * @example
      * // check if VR is available
-     * if (app.xr.isAvailable(pc.XRTYPE_VR)) {
+     * if (app.xr.isAvailable(XRTYPE_VR)) {
      *     // VR is available
      * }
      */
@@ -513,7 +534,7 @@ class AppBase extends EventHandler {
      *
      * @param {HTMLCanvasElement | OffscreenCanvas} canvas - The canvas element.
      * @example
-     * const app = new pc.AppBase(canvas);
+     * const app = new AppBase(canvas);
      *
      * const options = new AppOptions();
      * app.init(options);
@@ -548,7 +569,8 @@ class AppBase extends EventHandler {
     init(appOptions) {
         const {
             assetPrefix, batchManager, componentSystems, elementInput, gamepads, graphicsDevice, keyboard,
-            lightmapper, mouse, resourceHandlers, scriptsOrder, scriptPrefix, soundManager, touch, xr
+            lightmapper, mouse, physicsWorld, resourceHandlers, scriptsOrder, scriptPrefix, soundManager,
+            touch, xr
         } = appOptions;
 
         Debug.assert(graphicsDevice, 'The application cannot be created without a valid GraphicsDevice');
@@ -560,7 +582,7 @@ class AppBase extends EventHandler {
 
         this._initDefaultMaterial();
         this._initProgramLibrary();
-        this.stats = new ApplicationStats(graphicsDevice);
+        this._stats = new AppStats(this);
 
         this._soundManager = soundManager;
         this.scene = new Scene(graphicsDevice);
@@ -635,10 +657,31 @@ class AppBase extends EventHandler {
             this.systems.add(new componentSystem(this));
         });
 
+        // Install a user-supplied physics backend. When omitted, the rigid body system
+        // auto-detects Ammo once application libraries have loaded (see onLibrariesLoaded).
+        if (physicsWorld) {
+            Debug.assert(this.systems.rigidbody, 'AppOptions.physicsWorld requires RigidBodyComponentSystem to be included in AppOptions.componentSystems.');
+            this.systems.rigidbody?.setPhysicsWorld(physicsWorld);
+        }
+
         this._visibilityChangeHandler = this.onVisibilityChange.bind(this);
 
         if (typeof document !== 'undefined') {
             document.addEventListener('visibilitychange', this._visibilityChangeHandler, false);
+        }
+
+        // announce the initialized app to a devtools extension, such as the PlayCanvas Inspector,
+        // which defines this hook before the page runs, unless the app opted out. Without the hook
+        // this is a single lookup. A broken or outdated extension must not break the app, so its
+        // failures are contained
+        const hook = appOptions.devtools !== false ? globalThis[Symbol.for('playcanvas.inspector')] : undefined;
+        if (hook?.register) {
+            this._devtoolsRegistered = true;
+            try {
+                hook.register(this, { version, revision, protocol: DEVTOOLS_PROTOCOL });
+            } catch (e) {
+                Debug.warn('The devtools hook failed to register the app.', e);
+            }
         }
     }
 
@@ -654,7 +697,7 @@ class AppBase extends EventHandler {
      * this id. Otherwise current application will be returned.
      * @returns {AppBase|undefined} The running application, if any.
      * @example
-     * const app = pc.AppBase.getApplication();
+     * const app = AppBase.getApplication();
      */
     static getApplication(id) {
         return id ? AppBase._applications[id] : getApplication();
@@ -669,7 +712,7 @@ class AppBase extends EventHandler {
 
     /** @private */
     _initProgramLibrary() {
-        const library = new ProgramLibrary(this.graphicsDevice, new StandardMaterial());
+        const library = new ProgramLibrary(this.graphicsDevice);
         setProgramLibrary(this.graphicsDevice, library);
     }
 
@@ -704,6 +747,17 @@ class AppBase extends EventHandler {
      */
     get fillMode() {
         return this._fillMode;
+    }
+
+    /**
+     * The application's performance statistics. Returns the same {@link AppStats} instance on
+     * every access. Engine measurements are read-only; {@link AppStats#user} holds writable
+     * application-defined counters. See {@link AppStats} for units, sampling and GPU profiling setup.
+     *
+     * @type {AppStats}
+     */
+    get stats() {
+        return this._stats;
     }
 
     /**
@@ -752,6 +806,11 @@ class AppBase extends EventHandler {
 
     /**
      * Load all assets in the asset registry that are marked as 'preload'.
+     *
+     * Container-backed render assets wait for their referenced containers to be registered and
+     * loaded. If a preloaded render asset's `data.containerAsset` refers to a container that is
+     * never registered, this method never calls its callback or fires `preload:end`. Debug builds
+     * warn when a render asset starts waiting for an unregistered container.
      *
      * @param {PreloadAppCallback} callback - Function called when all assets are loaded.
      */
@@ -807,6 +866,11 @@ class AppBase extends EventHandler {
         // configure the concurrent request limit - overrides the default (0 is valid, meaning unlimited)
         if (typeof props.maxConcurrentRequests === 'number' && props.maxConcurrentRequests >= 0) {
             this.loader.maxConcurrentRequests = props.maxConcurrentRequests;
+        }
+
+        // send asset requests with credentials - applied before preloading so preloaded assets pick it up
+        if (typeof props.withCredentials === 'boolean') {
+            this.loader.withCredentials = props.withCredentials;
         }
 
         // TODO: remove this temporary block after migrating properties
@@ -1006,6 +1070,9 @@ class AppBase extends EventHandler {
      * This function is called internally by PlayCanvas applications made in the Editor but you
      * will need to call start yourself if you are using the engine stand-alone.
      *
+     * The main loop is driven by `requestAnimationFrame`. Where that is unavailable, such as in
+     * Node.js, no loop runs, so call {@link update} yourself at the rate you need.
+     *
      * @example
      * app.start();
      */
@@ -1046,7 +1113,12 @@ class AppBase extends EventHandler {
         if (this.xr?.session) {
             this.frameRequestId = this.xr.session.requestAnimationFrame(this.tick);
         } else {
-            this.frameRequestId = platform.browser || platform.worker ? requestAnimationFrame(this.tick) : null;
+            // without requestAnimationFrame, as in Node.js (even with jsdom), there is no main
+            // loop and the application is driven by calling update directly. A pending frame is
+            // cancelled on each tick and on destroy, so both functions are required.
+            const hasFrameLoop = typeof requestAnimationFrame === 'function' &&
+                typeof cancelAnimationFrame === 'function';
+            this.frameRequestId = hasFrameLoop ? requestAnimationFrame(this.tick) : null;
         }
     }
 
@@ -1072,9 +1144,12 @@ class AppBase extends EventHandler {
      * Update the application. This function will call the update functions and then the postUpdate
      * functions of all enabled components. It will then update the current state of all connected
      * input devices. This function is called internally in the application's main loop and does
-     * not need to be called explicitly.
+     * not need to be called explicitly, except where there is no main loop, such as in Node.js.
      *
      * @param {number} dt - The time delta in seconds since the last frame.
+     * @example
+     * // run a Node.js server at 20 updates per second
+     * setInterval(() => app.update(1 / 20), 50);
      */
     update(dt) {
         this.frame++;
@@ -1085,9 +1160,7 @@ class AppBase extends EventHandler {
 
         this.graphicsDevice.update();
 
-        // #if _PROFILER
         this.stats.frame.updateStart = now();
-        // #endif
 
         // script update
         this.stats.frame.scriptUpdateStart = now();
@@ -1110,9 +1183,7 @@ class AppBase extends EventHandler {
         // update input devices
         this.inputUpdate(dt);
 
-        // #if _PROFILER
         this.stats.frame.updateTime = now() - this.stats.frame.updateStart;
-        // #endif
     }
 
     /**
@@ -1127,9 +1198,7 @@ class AppBase extends EventHandler {
 
         this.graphicsDevice.frameStart();
 
-        // #if _PROFILER
         this.stats.frame.renderStart = now();
-        // #endif
 
         this.fire('prerender');
         this.root.syncHierarchy();
@@ -1156,15 +1225,23 @@ class AppBase extends EventHandler {
     renderComposition(layerComposition) {
         DebugGraphics.clearGpuMarkers();
 
-        // update composition, cull everything, assign atlas slots for clustered lighting
+        // update composition + light visibility, assign atlas slots for clustered lighting
         this.renderer.update(layerComposition);
 
+        // build the frame graph from the (not-yet-culled) composition
         this.renderer.buildFrameGraph(this.frameGraph, layerComposition);
+
+        // cull mesh instances and shadow casters - this fills what the passes read at render time
+        this.renderer.cull(layerComposition);
+
         this.frameGraph.render(this.graphicsDevice);
     }
 
     /**
-     * Controls how the canvas fills the window and resizes when the window changes.
+     * Controls how the canvas fills the window. The canvas is sized when this is called and on
+     * every {@link AppBase#resizeCanvas}; the engine installs no window `resize` listener of its
+     * own, so call `resizeCanvas` from your own handler to keep the window-relative modes tracking
+     * the window.
      *
      * @param {string} mode - The mode to use when setting the size of the canvas. Can be:
      *
@@ -1407,6 +1484,9 @@ class AppBase extends EventHandler {
      * @param {number} [settings.render.lightingShadowAtlasResolution] - Resolution of the atlas texture storing all non-directional shadow textures. Defaults to 2048.
      * @param {number} [settings.render.lightingCookieAtlasResolution] - Resolution of the atlas texture storing all non-directional cookie textures. Defaults to 2048.
      * @param {number} [settings.render.lightingMaxLightsPerCell] - Maximum number of lights a cell can store. Defaults to 255.
+     * @param {number} [settings.render.lightingMaxLights] - Maximum number of lights the clustered lighting can use in a single
+     * frame. Keep this as low as the scene allows, as a larger value has a per-frame cost. The value is limited by the maximum
+     * texture size supported by the device. Defaults to 255.
      * @param {number} [settings.render.lightingShadowType] - The type of shadow filtering used by all shadows. Can be:
      *
      * - {@link SHADOW_PCF1_32F}
@@ -1423,10 +1503,11 @@ class AppBase extends EventHandler {
      * Only lights with bakeDir=true will be used for generating the dominant light direction.
      * @param {boolean} [settings.render.gsplatRadialSorting] - Enables radial sorting of Gaussian splats. Defaults to false.
      * @param {number} [settings.render.gsplatLodUpdateDistance] - Distance threshold in world units to trigger gsplat LOD updates. Defaults to 1.
-     * @param {number} [settings.render.gsplatLodUpdateAngle] - Angle threshold in degrees to trigger gsplat LOD updates based on camera rotation. Defaults to 0.
-     * @param {number} [settings.render.gsplatLodBehindPenalty] - Multiplier applied to effective distance for gsplat nodes behind the camera. Defaults to 1.
+     * @param {number} [settings.render.gsplatLodUpdateAngle] - Angle threshold in degrees to trigger gsplat LOD updates based on camera rotation. Defaults to 90.
+     * @param {number} [settings.render.gsplatLodBehindPenalty] - Multiplier applied to effective distance for gsplat nodes behind the camera. Defaults to 1.5.
      * @param {number} [settings.render.gsplatLodUnderfillLimit] - Maximum number of gsplat LOD levels allowed below the optimal level when optimal data is not resident. Defaults to 0.
-     * @param {number} [settings.render.gsplatSplatBudget] - Target number of splats across all GSplats in the scene. 0 disables budget enforcement. Defaults to 0.
+     * @param {number} [settings.render.gsplatSplatBudget] - Number of splats across all GSplats in the scene, used as set by `gsplatSplatBudgetMode`. 0 means no budget. Defaults to 1000000.
+     * @param {string} [settings.render.gsplatSplatBudgetMode] - How the splat budget is used for streamed GSplats: 'target' (default) raises detail until the budget is used up; 'limit' lets the LOD distances of each GSplat decide the detail and only lowers it when they would exceed the budget.
      * @param {number} [settings.render.gsplatAlphaClip] - Alpha threshold for gsplat shadow, pick, and prepass rendering. Defaults to 0.3.
      * @param {number} [settings.render.gsplatAlphaClipForward] - Alpha threshold for the forward gsplat rendering pass. Defaults to 1 / 255.
      * @param {number} [settings.render.gsplatMinPixelSize] - Minimum screen-space pixel size below which splats are discarded. Defaults to 2.
@@ -1435,6 +1516,8 @@ class AppBase extends EventHandler {
      * @param {number} [settings.render.gsplatFoveationCenter] - Protected centre radius for foveated contribution culling. Defaults to 0.3.
      * @param {boolean} [settings.render.gsplatAntiAlias] - Enables anti-aliasing compensation for Gaussian splats. Defaults to false.
      * @param {boolean} [settings.render.gsplatUseFog] - Whether to apply scene fog to Gaussian splats. Defaults to true.
+     * @param {boolean} [settings.render.gsplatUseTonemap] - Whether to apply the camera's tonemapping and the
+     * scene exposure to Gaussian splats. Defaults to true.
      * @param {number} [settings.render.gsplatColorUpdateAngle] - Viewing angle threshold in degrees for triggering gsplat spherical harmonics color updates. Defaults to 10.
      * @param {number} [settings.render.gsplatCooldownTicks] - Number of update ticks before unloading unused streamed gsplat resources. Defaults to 100.
      * @param {string} [settings.render.gsplatDataFormat] - Work buffer data format for gsplat rendering. One of the GSPLATDATA_* constants. Defaults to {@link GSPLATDATA_COMPACT}.
@@ -1469,7 +1552,8 @@ class AppBase extends EventHandler {
     applySceneSettings(settings) {
         let asset;
 
-        if (this.systems.rigidbody && typeof Ammo !== 'undefined') {
+        // gravity is engine state - the physics backend applies it when present
+        if (this.systems.rigidbody) {
             const [x, y, z] = settings.physics.gravity;
             this.systems.rigidbody.gravity.set(x, y, z);
         }
@@ -1513,27 +1597,19 @@ class AppBase extends EventHandler {
      */
     setSkybox(asset) {
         if (asset !== this._skyboxAsset) {
-            const onSkyboxRemoved = () => {
-                this.setSkybox(null);
-            };
-
-            const onSkyboxChanged = () => {
-                this.scene.setSkybox(this._skyboxAsset ? this._skyboxAsset.resources : null);
-            };
-
             // cleanup previous asset
             if (this._skyboxAsset) {
-                this.assets.off(`load:${this._skyboxAsset.id}`, onSkyboxChanged, this);
-                this.assets.off(`remove:${this._skyboxAsset.id}`, onSkyboxRemoved, this);
-                this._skyboxAsset.off('change', onSkyboxChanged, this);
+                this.assets.off(`load:${this._skyboxAsset.id}`, this._onSkyboxChanged, this);
+                this.assets.off(`remove:${this._skyboxAsset.id}`, this._onSkyboxRemoved, this);
+                this._skyboxAsset.off('change', this._onSkyboxChanged, this);
             }
 
             // set new asset
             this._skyboxAsset = asset;
             if (this._skyboxAsset) {
-                this.assets.on(`load:${this._skyboxAsset.id}`, onSkyboxChanged, this);
-                this.assets.once(`remove:${this._skyboxAsset.id}`, onSkyboxRemoved, this);
-                this._skyboxAsset.on('change', onSkyboxChanged, this);
+                this.assets.on(`load:${this._skyboxAsset.id}`, this._onSkyboxChanged, this);
+                this.assets.once(`remove:${this._skyboxAsset.id}`, this._onSkyboxRemoved, this);
+                this._skyboxAsset.on('change', this._onSkyboxChanged, this);
 
                 if (this.scene.skyboxMip === 0 && !this._skyboxAsset.loadFaces) {
                     this._skyboxAsset.loadFaces = true;
@@ -1542,8 +1618,18 @@ class AppBase extends EventHandler {
                 this.assets.load(this._skyboxAsset);
             }
 
-            onSkyboxChanged();
+            this._onSkyboxChanged();
         }
+    }
+
+    /** @private */
+    _onSkyboxRemoved() {
+        this.setSkybox(null);
+    }
+
+    /** @private */
+    _onSkyboxChanged() {
+        this.scene.setSkybox(this._skyboxAsset ? this._skyboxAsset.resources : null);
     }
 
     /** @private */
@@ -1573,26 +1659,27 @@ class AppBase extends EventHandler {
      *
      * @param {Vec3} start - The start world space coordinate of the line.
      * @param {Vec3} end - The end world space coordinate of the line.
-     * @param {Color} [color] - The color of the line. It defaults to white if not specified.
+     * @param {Color} [color] - The color of the line, specified in sRGB color space. It defaults
+     * to white if not specified.
      * @param {boolean} [depthTest] - Specifies if the line is depth tested against the depth
      * buffer. Defaults to true.
      * @param {Layer} [layer] - The layer to render the line into. Defaults to {@link LAYERID_IMMEDIATE}.
      * @example
      * // Render a 1-unit long white line
-     * const start = new pc.Vec3(0, 0, 0);
-     * const end = new pc.Vec3(1, 0, 0);
+     * const start = new Vec3(0, 0, 0);
+     * const end = new Vec3(1, 0, 0);
      * app.drawLine(start, end);
      * @example
      * // Render a 1-unit long red line which is not depth tested and renders on top of other geometry
-     * const start = new pc.Vec3(0, 0, 0);
-     * const end = new pc.Vec3(1, 0, 0);
-     * app.drawLine(start, end, pc.Color.RED, false);
+     * const start = new Vec3(0, 0, 0);
+     * const end = new Vec3(1, 0, 0);
+     * app.drawLine(start, end, Color.RED, false);
      * @example
      * // Render a 1-unit long white line into the world layer
-     * const start = new pc.Vec3(0, 0, 0);
-     * const end = new pc.Vec3(1, 0, 0);
-     * const worldLayer = app.scene.layers.getLayerById(pc.LAYERID_WORLD);
-     * app.drawLine(start, end, pc.Color.WHITE, true, worldLayer);
+     * const start = new Vec3(0, 0, 0);
+     * const end = new Vec3(1, 0, 0);
+     * const worldLayer = app.scene.layers.getLayerById(LAYERID_WORLD);
+     * app.drawLine(start, end, Color.WHITE, true, worldLayer);
      */
     drawLine(start, end, color, depthTest, layer) {
         this.scene.drawLine(start, end, color, depthTest, layer);
@@ -1615,26 +1702,26 @@ class AppBase extends EventHandler {
      * @param {Layer} [layer] - The layer to render the lines into. Defaults to {@link LAYERID_IMMEDIATE}.
      * @example
      * // Render a single line, with unique colors for each point
-     * const start = new pc.Vec3(0, 0, 0);
-     * const end = new pc.Vec3(1, 0, 0);
-     * app.drawLines([start, end], [pc.Color.RED, pc.Color.WHITE]);
+     * const start = new Vec3(0, 0, 0);
+     * const end = new Vec3(1, 0, 0);
+     * app.drawLines([start, end], [Color.RED, Color.WHITE]);
      * @example
      * // Render 2 discrete line segments
      * const points = [
      *     // Line 1
-     *     new pc.Vec3(0, 0, 0),
-     *     new pc.Vec3(1, 0, 0),
+     *     new Vec3(0, 0, 0),
+     *     new Vec3(1, 0, 0),
      *     // Line 2
-     *     new pc.Vec3(1, 1, 0),
-     *     new pc.Vec3(1, 1, 1)
+     *     new Vec3(1, 1, 0),
+     *     new Vec3(1, 1, 1)
      * ];
      * const colors = [
      *     // Line 1
-     *     pc.Color.RED,
-     *     pc.Color.YELLOW,
+     *     Color.RED,
+     *     Color.YELLOW,
      *     // Line 2
-     *     pc.Color.CYAN,
-     *     pc.Color.BLUE
+     *     Color.CYAN,
+     *     Color.BLUE
      * ];
      * app.drawLines(points, colors);
      */
@@ -1680,150 +1767,39 @@ class AppBase extends EventHandler {
     }
 
     /**
-     * Draws a wireframe sphere with center, radius and color.
-     *
-     * @param {Vec3} center - The center of the sphere.
-     * @param {number} radius - The radius of the sphere.
-     * @param {Color} [color] - The color of the sphere. It defaults to white if not specified.
-     * @param {number} [segments] - Number of line segments used to render the circles forming the
-     * sphere. Defaults to 20.
-     * @param {boolean} [depthTest] - Specifies if the sphere lines are depth tested against the
-     * depth buffer. Defaults to true.
-     * @param {Layer} [layer] - The layer to render the sphere into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @example
-     * // Render a red wire sphere with radius of 1
-     * const center = new pc.Vec3(0, 0, 0);
-     * app.drawWireSphere(center, 1.0, pc.Color.RED);
+     * @deprecated Use {@link WireRenderer#sphere} instead.
      * @ignore
      */
-    drawWireSphere(center, radius, color = Color.WHITE, segments = 20, depthTest = true, layer = this.scene.defaultDrawLayer) {
-        this.scene.immediate.drawWireSphere(center, radius, color, segments, depthTest, layer);
+    drawWireSphere() {
+        Debug.removed('AppBase#drawWireSphere is removed. Use WireRenderer#sphere instead.');
     }
 
     /**
-     * Draws a wireframe axis aligned box specified by min and max points and color.
-     *
-     * @param {Vec3} minPoint - The min corner point of the box.
-     * @param {Vec3} maxPoint - The max corner point of the box.
-     * @param {Color} [color] - The color of the sphere. It defaults to white if not specified.
-     * @param {boolean} [depthTest] - Specifies if the sphere lines are depth tested against the
-     * depth buffer. Defaults to true.
-     * @param {Layer} [layer] - The layer to render the sphere into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @param {Mat4} [mat] - Matrix to transform the box before rendering.
-     * @example
-     * // Render a red wire aligned box
-     * const min = new pc.Vec3(-1, -1, -1);
-     * const max = new pc.Vec3(1, 1, 1);
-     * app.drawWireAlignedBox(min, max, pc.Color.RED);
+     * @deprecated Use {@link WireRenderer#boxMinMax} instead.
      * @ignore
      */
-    drawWireAlignedBox(minPoint, maxPoint, color = Color.WHITE, depthTest = true, layer = this.scene.defaultDrawLayer, mat) {
-        this.scene.immediate.drawWireAlignedBox(minPoint, maxPoint, color, depthTest, layer, mat);
+    drawWireAlignedBox() {
+        Debug.removed('AppBase#drawWireAlignedBox is removed. Use WireRenderer#boxMinMax instead.');
     }
 
-    /**
-     * Draw meshInstance at this frame
-     *
-     * @param {MeshInstance} meshInstance - The mesh instance
-     * to draw.
-     * @param {Layer} [layer] - The layer to render the mesh instance into. Defaults to
-     * {@link LAYERID_IMMEDIATE}.
-     * @ignore
-     */
-    drawMeshInstance(meshInstance, layer = this.scene.defaultDrawLayer) {
-        this.scene.immediate.drawMesh(null, null, null, meshInstance, layer);
+    drawMeshInstance() {
+        Debug.removed('AppBase#drawMeshInstance is removed. Use Layer#addMeshInstances instead.');
     }
 
-    /**
-     * Draw mesh at this frame.
-     *
-     * @param {Mesh} mesh - The mesh to draw.
-     * @param {Material} material - The material to use to render the mesh.
-     * @param {Mat4} matrix - The matrix to use to render the mesh.
-     * @param {Layer} [layer] - The layer to render the mesh into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @ignore
-     */
-    drawMesh(mesh, material, matrix, layer = this.scene.defaultDrawLayer) {
-        this.scene.immediate.drawMesh(material, matrix, mesh, null, layer);
+    drawMesh() {
+        Debug.removed('AppBase#drawMesh is removed. Create a MeshInstance and use Layer#addMeshInstances instead.');
     }
 
-    /**
-     * Draw quad of size [-0.5, 0.5] at this frame.
-     *
-     * @param {Mat4} matrix - The matrix to use to render the quad.
-     * @param {Material} material - The material to use to render the quad.
-     * @param {Layer} [layer] - The layer to render the quad into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @ignore
-     */
-    drawQuad(matrix, material, layer = this.scene.defaultDrawLayer) {
-        this.scene.immediate.drawMesh(material, matrix, this.scene.immediate.getQuadMesh(), null, layer);
+    drawQuad() {
+        Debug.removed('AppBase#drawQuad is removed. Create a quad MeshInstance and use Layer#addMeshInstances, or use TextureRenderer#draw for texture previews.');
     }
 
-    /**
-     * Draws a texture at [x, y] position on screen, with size [width, height]. The origin of the
-     * screen is top-left [0, 0]. Coordinates and sizes are in projected space (-1 .. 1).
-     *
-     * @param {number} x - The x coordinate on the screen of the center of the texture.
-     * Should be in the range [-1, 1].
-     * @param {number} y - The y coordinate on the screen of the center of the texture.
-     * Should be in the range [-1, 1].
-     * @param {number} width - The width of the rectangle of the rendered texture. Should be in the
-     * range [0, 2].
-     * @param {number} height - The height of the rectangle of the rendered texture. Should be in
-     * the range [0, 2].
-     * @param {Texture} texture - The texture to render.
-     * @param {Material} material - The material used when rendering the texture.
-     * @param {Layer} [layer] - The layer to render the texture into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @param {boolean} [filterable] - Indicate if the texture can be sampled using filtering.
-     * Passing false uses unfiltered sampling, allowing a depth texture to be sampled on WebGPU.
-     * Defaults to true.
-     * @ignore
-     */
-    drawTexture(x, y, width, height, texture, material, layer = this.scene.defaultDrawLayer, filterable = true) {
-
-        // only WebGPU supports filterable parameter to be false, allowing a depth texture / shadow
-        // map to be fetched (without filtering) and rendered
-        if (filterable === false && !this.graphicsDevice.isWebGPU) {
-            return;
-        }
-
-        // TODO: if this is used for anything other than debug texture display, we should optimize this to avoid allocations
-        const matrix = new Mat4();
-        matrix.setTRS(new Vec3(x, y, 0.0), Quat.IDENTITY, new Vec3(width, -height, 0.0));
-
-        if (!material) {
-            material = new ShaderMaterial();
-            material.cull = CULLFACE_NONE;
-            material.setParameter('colorMap', texture);
-            material.shaderDesc = filterable ? this.scene.immediate.getTextureShaderDesc(texture.encoding) : this.scene.immediate.getUnfilterableTextureShaderDesc();
-            material.update();
-        }
-
-        this.drawQuad(matrix, material, layer);
+    drawTexture() {
+        Debug.removed('AppBase#drawTexture is removed. Use TextureRenderer#draw instead.');
     }
 
-    /**
-     * Draws a depth texture at [x, y] position on screen, with size [width, height]. The origin of
-     * the screen is top-left [0, 0]. Coordinates and sizes are in projected space (-1 .. 1).
-     *
-     * @param {number} x - The x coordinate on the screen of the center of the texture.
-     * Should be in the range [-1, 1].
-     * @param {number} y - The y coordinate on the screen of the center of the texture.
-     * Should be in the range [-1, 1].
-     * @param {number} width - The width of the rectangle of the rendered texture. Should be in the
-     * range [0, 2].
-     * @param {number} height - The height of the rectangle of the rendered texture. Should be in
-     * the range [0, 2].
-     * @param {Layer} [layer] - The layer to render the texture into. Defaults to {@link LAYERID_IMMEDIATE}.
-     * @ignore
-     */
-    drawDepthTexture(x, y, width, height, layer = this.scene.defaultDrawLayer) {
-        const material = new ShaderMaterial();
-        material.cull = CULLFACE_NONE;
-        material.shaderDesc = this.scene.immediate.getDepthTextureShaderDesc();
-        material.update();
-
-        this.drawTexture(x, y, width, height, null, material, layer);
+    drawDepthTexture() {
+        Debug.removed('AppBase#drawDepthTexture is removed. Use TextureRenderer#sceneDepth instead.');
     }
 
     /**
@@ -1838,6 +1814,16 @@ class AppBase extends EventHandler {
         if (this._inFrameUpdate) {
             this._destroyRequested = true;
             return;
+        }
+
+        // only an app that announced itself withdraws
+        if (this._devtoolsRegistered) {
+            this._devtoolsRegistered = false;
+            try {
+                globalThis[Symbol.for('playcanvas.inspector')]?.unregister?.(this);
+            } catch (e) {
+                Debug.warn('The devtools hook failed to unregister the app.', e);
+            }
         }
 
         const canvasId = this.graphicsDevice.canvas.id;
@@ -1886,11 +1872,6 @@ class AppBase extends EventHandler {
         }
 
         this.systems.destroy();
-
-        // layer composition
-        if (this.scene.layers) {
-            this.scene.layers.destroy();
-        }
 
         // destroy bundle registry
         this.bundles.destroy();
@@ -1942,7 +1923,8 @@ class AppBase extends EventHandler {
             assets[i].unload();
             assets[i].off();
         }
-        this.assets.off();
+        this.assets.destroy();
+        this.assets = null;
 
         // destroy scene after assets are unloaded (components need scene.layers during asset cleanup)
         this.scene.destroy();
@@ -1962,6 +1944,12 @@ class AppBase extends EventHandler {
 
         if (getApplication() === this) {
             setApplication(null);
+        }
+
+        // clear the module scoped reference, which would otherwise keep the destroyed application
+        // alive. Skipped if another application has already taken over.
+        if (app === this) {
+            app = null;
         }
 
         AppBase.cancelTick(this);
@@ -1997,6 +1985,147 @@ class AppBase extends EventHandler {
             this.stats.frame.gsplatSort += sortTime;
         });
     }
+
+    /**
+     * Reports whether the document is in fullscreen mode.
+     *
+     * @returns {boolean} True if the document is in fullscreen.
+     * @ignore
+     * @deprecated Use the Fullscreen API directly.
+     */
+    isFullscreen() {
+        Debug.deprecated('AppBase#isFullscreen is deprecated. Use the Fullscreen API directly.');
+
+        return !!document.fullscreenElement;
+    }
+
+    /**
+     * Requests fullscreen mode on the given element.
+     *
+     * @param {Element} [element] - The element to make fullscreen. Defaults to the graphics
+     * device canvas.
+     * @param {Function} [success] - Called once fullscreen has been entered.
+     * @param {Function} [error] - Called if entering fullscreen fails.
+     * @ignore
+     * @deprecated Use the Fullscreen API directly.
+     */
+    enableFullscreen(element, success, error) {
+        Debug.deprecated('AppBase#enableFullscreen is deprecated. Use the Fullscreen API directly.');
+
+        element = element || this.graphicsDevice.canvas;
+
+        // success callback
+        const s = function () {
+            success();
+            document.removeEventListener('fullscreenchange', s);
+        };
+
+        // error callback
+        const e = function () {
+            error();
+            document.removeEventListener('fullscreenerror', e);
+        };
+
+        if (success) {
+            document.addEventListener('fullscreenchange', s, false);
+        }
+
+        if (error) {
+            document.addEventListener('fullscreenerror', e, false);
+        }
+
+        if (element.requestFullscreen) {
+            element.requestFullscreen(Element.ALLOW_KEYBOARD_INPUT);
+        } else {
+            error();
+        }
+    }
+
+    /**
+     * Exits fullscreen mode.
+     *
+     * @param {Function} [success] - Called once fullscreen has been exited.
+     * @ignore
+     * @deprecated Use the Fullscreen API directly.
+     */
+    disableFullscreen(success) {
+        Debug.deprecated('AppBase#disableFullscreen is deprecated. Use the Fullscreen API directly.');
+
+        // success callback
+        const s = function () {
+            success();
+            document.removeEventListener('fullscreenchange', s);
+        };
+
+        if (success) {
+            document.addEventListener('fullscreenchange', s, false);
+        }
+
+        document.exitFullscreen();
+    }
+
+    /**
+     * Gets the URL of a scene by name.
+     *
+     * @param {string} name - The name of the scene.
+     * @returns {string|null} The URL of the scene, or null if not found.
+     * @ignore
+     * @deprecated Use {@link AppBase#scenes} and {@link SceneRegistry#find} instead.
+     */
+    getSceneUrl(name) {
+        Debug.deprecated('AppBase#getSceneUrl is deprecated. Use AppBase#scenes and SceneRegistry#find instead.');
+        const entry = this.scenes.find(name);
+        if (entry) {
+            return entry.url;
+        }
+        return null;
+    }
+
+    /**
+     * Loads a scene.
+     *
+     * @param {string} url - The URL of the scene file.
+     * @param {Function} callback - Called when the scene has loaded.
+     * @ignore
+     * @deprecated Use {@link AppBase#scenes} and {@link SceneRegistry#loadScene} instead.
+     */
+    loadScene(url, callback) {
+        Debug.deprecated('AppBase#loadScene is deprecated. Use AppBase#scenes and SceneRegistry#loadScene instead.');
+        this.scenes.loadScene(url, callback);
+    }
+
+    /**
+     * Loads a scene hierarchy.
+     *
+     * @param {string} url - The URL of the scene file.
+     * @param {Function} callback - Called when the scene hierarchy has loaded.
+     * @ignore
+     * @deprecated Use {@link AppBase#scenes} and {@link SceneRegistry#loadSceneHierarchy} instead.
+     */
+    loadSceneHierarchy(url, callback) {
+        Debug.deprecated('AppBase#loadSceneHierarchy is deprecated. Use AppBase#scenes and SceneRegistry#loadSceneHierarchy instead.');
+        this.scenes.loadSceneHierarchy(url, callback);
+    }
+
+    /**
+     * Loads scene settings.
+     *
+     * @param {string} url - The URL of the scene file.
+     * @param {Function} callback - Called when the scene settings have loaded.
+     * @ignore
+     * @deprecated Use {@link AppBase#scenes} and {@link SceneRegistry#loadSceneSettings} instead.
+     */
+    loadSceneSettings(url, callback) {
+        Debug.deprecated('AppBase#loadSceneSettings is deprecated. Use AppBase#scenes and SceneRegistry#loadSceneSettings instead.');
+        this.scenes.loadSceneSettings(url, callback);
+    }
 }
 
 export { app, AppBase };
+
+// ForwardRenderer#renderComposition is deprecated and patched here, rather than declared on the
+// class, because it needs getApplication and scene code must not import from framework.
+ForwardRenderer.prototype.renderComposition = function (comp) {
+    Debug.deprecated('ForwardRenderer#renderComposition is deprecated. Use AppBase.renderComposition instead.');
+    getApplication().renderComposition(comp);
+};

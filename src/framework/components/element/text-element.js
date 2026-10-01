@@ -3,8 +3,17 @@ import { string } from '../../../core/string.js';
 import { math } from '../../../core/math/math.js';
 import { Color } from '../../../core/math/color.js';
 import { Vec2 } from '../../../core/math/vec2.js';
+import { Vec3 } from '../../../core/math/vec3.js';
 import { BoundingBox } from '../../../core/shape/bounding-box.js';
-import { SEMANTIC_POSITION, SEMANTIC_TEXCOORD0, SEMANTIC_COLOR, SEMANTIC_ATTR8, SEMANTIC_ATTR9, TYPE_FLOAT32 } from '../../../platform/graphics/constants.js';
+import {
+    BUFFER_STATIC, INDEXFORMAT_UINT16, INDEXFORMAT_UINT32, PRIMITIVE_TRIANGLES, SEMANTIC_POSITION,
+    SEMANTIC_NORMAL, SEMANTIC_TEXCOORD0, SEMANTIC_COLOR, SEMANTIC_ATTR8, SEMANTIC_ATTR9,
+    TYPE_FLOAT32, TYPE_UINT8
+} from '../../../platform/graphics/constants.js';
+import { DeviceCache } from '../../../platform/graphics/device-cache.js';
+import { IndexBuffer } from '../../../platform/graphics/index-buffer.js';
+import { VertexBuffer } from '../../../platform/graphics/vertex-buffer.js';
+import { VertexFormat } from '../../../platform/graphics/vertex-format.js';
 import { VertexIterator } from '../../../platform/graphics/vertex-iterator.js';
 import { GraphNode } from '../../../scene/graph-node.js';
 import { MeshInstance } from '../../../scene/mesh-instance.js';
@@ -17,6 +26,7 @@ import { Markup } from './markup.js';
 
 /**
  * @import { CanvasFont } from '../../../framework/font/canvas-font.js'
+ * @import { GraphicsDevice } from '../../../platform/graphics/graphics-device.js'
  * @import { Font } from '../../../framework/font/font.js'
  */
 
@@ -30,43 +40,69 @@ class MeshInfo {
         this.lines = {};
         // float array for positions
         this.positions = [];
-        // float array for normals
-        this.normals = [];
         // float array for UVs
         this.uvs = [];
         // float array for vertex colors
         this.colors = [];
-        // float array for indices
-        this.indices = [];
         // float array for outline
         this.outlines = [];
         // float array for shadows
         this.shadows = [];
-        // pc.MeshInstance created from this MeshInfo
+        // number of word gaps preceding each quad on its line, used to justify text
+        this.gapIndices = [];
+        // MeshInstance created from this MeshInfo
         this.meshInstance = null;
     }
 }
 
+// per device cached vertex format, to share it by all text meshes
+const _vertexFormatDeviceCache = new DeviceCache();
+
 /**
- * Creates a new text mesh object from the supplied vertex information and topology.
+ * Creates a text mesh with room for the given number of quads. Only the indices are filled in
+ * here, as they never change - the vertices and the bounding box are written by _updateMeshes.
  *
- * @param {object} device - The graphics device used to manage the mesh.
- * @param {MeshInfo} [meshInfo] - An object that specifies optional inputs for the function as follows:
- * @returns {Mesh} A new Mesh constructed from the supplied vertex and triangle data.
+ * @param {GraphicsDevice} device - The graphics device used to manage the mesh.
+ * @param {number} numQuads - The number of quads the mesh can hold.
+ * @returns {Mesh} The new mesh.
  * @ignore
  */
-function createTextMesh(device, meshInfo) {
+function createTextMesh(device, numQuads) {
+    const vertexFormat = _vertexFormatDeviceCache.get(device, () => {
+        return new VertexFormat(device, [
+            { semantic: SEMANTIC_POSITION, components: 3, type: TYPE_FLOAT32 },
+            { semantic: SEMANTIC_NORMAL, components: 3, type: TYPE_FLOAT32 },
+            { semantic: SEMANTIC_COLOR, components: 4, type: TYPE_UINT8, normalize: true },
+            { semantic: SEMANTIC_TEXCOORD0, components: 2, type: TYPE_FLOAT32 },
+            { semantic: SEMANTIC_ATTR8, components: 3, type: TYPE_FLOAT32 },
+            { semantic: SEMANTIC_ATTR9, components: 3, type: TYPE_FLOAT32 }
+        ]);
+    });
+
+    const numVertices = numQuads * 4;
+    const numIndices = numQuads * 6;
+    const uint32 = numVertices > 0xffff;
+    const indices = uint32 ? new Uint32Array(numIndices) : new Uint16Array(numIndices);
+    for (let q = 0; q < numQuads; q++) {
+        const i = q * 6;
+        const v = q * 4;
+        indices[i + 0] = v;
+        indices[i + 1] = v + 1;
+        indices[i + 2] = v + 3;
+        indices[i + 3] = v + 2;
+        indices[i + 4] = v + 3;
+        indices[i + 5] = v + 1;
+    }
+    const indexFormat = uint32 ? INDEXFORMAT_UINT32 : INDEXFORMAT_UINT16;
+
     const mesh = new Mesh(device);
-
-    mesh.setPositions(meshInfo.positions);
-    mesh.setNormals(meshInfo.normals);
-    mesh.setColors32(meshInfo.colors);
-    mesh.setUvs(0, meshInfo.uvs);
-    mesh.setIndices(meshInfo.indices);
-    mesh.setVertexStream(SEMANTIC_ATTR8, meshInfo.outlines, 3, undefined, TYPE_FLOAT32, false);
-    mesh.setVertexStream(SEMANTIC_ATTR9, meshInfo.shadows, 3, undefined, TYPE_FLOAT32, false);
-
-    mesh.update();
+    mesh.vertexBuffer = new VertexBuffer(device, vertexFormat, numVertices);
+    mesh.indexBuffer[0] = new IndexBuffer(device, indexFormat, numIndices, BUFFER_STATIC,
+        indices.buffer);
+    mesh.primitive[0].type = PRIMITIVE_TRIANGLES;
+    mesh.primitive[0].base = 0;
+    mesh.primitive[0].count = numIndices;
+    mesh.primitive[0].indexed = true;
     return mesh;
 }
 
@@ -143,7 +179,7 @@ class TextElement {
         this._font = null;
 
         this._color = new Color(1, 1, 1, 1);
-        this._colorUniform = new Float32Array(3);
+        this._colorUniform = new Float32Array([1, 1, 1, 1]);
 
         this._spacing = 1;
         this._fontSize = 32;
@@ -159,6 +195,7 @@ class TextElement {
         this._lineHeight = 32;
         this._scaledLineHeight = 32;
         this._wrapLines = false;
+        this._justify = false;
 
         this._drawOrder = 0;
 
@@ -237,6 +274,11 @@ class TextElement {
             this._model.destroy();
             this._model = null;
         }
+
+        // the node was added as a child of the entity, so detach it - otherwise it lingers in
+        // entity.children for the lifetime of the entity
+        this._node.remove();
+        this._node = null;
 
         this._fontAsset.destroy();
         this.font = null;
@@ -601,7 +643,7 @@ class TextElement {
             this._symbolShadowParams = null;
         }
 
-        this._updateMaterialEmissive();
+        this._updateColorUniform();
         this._updateMaterialOutline();
         this._updateMaterialShadow();
 
@@ -627,12 +669,12 @@ class TextElement {
                 }
 
                 meshInfo.count = l;
-                meshInfo.positions.length = meshInfo.normals.length = l * 3 * 4;
-                meshInfo.indices.length = l * 3 * 2;
+                meshInfo.positions.length = l * 3 * 4;
                 meshInfo.uvs.length = l * 2 * 4;
                 meshInfo.colors.length = l * 4 * 4;
                 meshInfo.outlines.length = l * 4 * 3;
                 meshInfo.shadows.length = l * 4 * 3;
+                meshInfo.gapIndices.length = this._justify ? l : 0;
 
                 // destroy old mesh
                 if (meshInfo.meshInstance) {
@@ -645,35 +687,7 @@ class TextElement {
                     continue;
                 }
 
-                // set up indices and normals whose values don't change when we call _updateMeshes
-                for (let v = 0; v < l; v++) {
-                    // create index and normal arrays since they don't change
-                    // if the length doesn't change
-                    meshInfo.indices[v * 3 * 2 + 0] = v * 4;
-                    meshInfo.indices[v * 3 * 2 + 1] = v * 4 + 1;
-                    meshInfo.indices[v * 3 * 2 + 2] = v * 4 + 3;
-                    meshInfo.indices[v * 3 * 2 + 3] = v * 4 + 2;
-                    meshInfo.indices[v * 3 * 2 + 4] = v * 4 + 3;
-                    meshInfo.indices[v * 3 * 2 + 5] = v * 4 + 1;
-
-                    meshInfo.normals[v * 4 * 3 + 0] = 0;
-                    meshInfo.normals[v * 4 * 3 + 1] = 0;
-                    meshInfo.normals[v * 4 * 3 + 2] = -1;
-
-                    meshInfo.normals[v * 4 * 3 + 3] = 0;
-                    meshInfo.normals[v * 4 * 3 + 4] = 0;
-                    meshInfo.normals[v * 4 * 3 + 5] = -1;
-
-                    meshInfo.normals[v * 4 * 3 + 6] = 0;
-                    meshInfo.normals[v * 4 * 3 + 7] = 0;
-                    meshInfo.normals[v * 4 * 3 + 8] = -1;
-
-                    meshInfo.normals[v * 4 * 3 + 9] = 0;
-                    meshInfo.normals[v * 4 * 3 + 10] = 0;
-                    meshInfo.normals[v * 4 * 3 + 11] = -1;
-                }
-
-                const mesh = createTextMesh(this._system.app.graphicsDevice, meshInfo);
+                const mesh = createTextMesh(this._system.app.graphicsDevice, l);
 
                 const mi = new MeshInstance(mesh, this._material, this._node);
                 mi.name = `Text Element: ${this._entity.name}`;
@@ -690,8 +704,8 @@ class TextElement {
 
                 this._setTextureParams(mi, this._font.textures[i]);
 
-                mi.setParameter('material_emissive', this._colorUniform);
-                mi.setParameter('material_opacity', this._color.a);
+                // Text materials are system-supplied and always enable MESH_COLOR.
+                mi.setParameter('mesh_color', this._colorUniform);
                 mi.setParameter('font_sdfIntensity', this._font.intensity);
                 mi.setParameter('font_pxrange', this._getPxRange(this._font));
 
@@ -781,9 +795,9 @@ class TextElement {
         }
     }
 
-    _updateMaterialEmissive() {
+    _updateColorUniform() {
         if (this._symbolColors) {
-            // when per-vertex coloring is present, disable material emissive color
+            // Markup supplies vertex colors, so keep the uniform tint white.
             this._colorUniform[0] = 1;
             this._colorUniform[1] = 1;
             this._colorUniform[2] = 1;
@@ -812,7 +826,7 @@ class TextElement {
     }
 
     _updateMaterialShadow() {
-        if (this._symbolOutlineParams) {
+        if (this._symbolShadowParams) {
             // when per-vertex shadow is present, disable material shadow uniforms
             this._shadowColorUniform[0] = 0;
             this._shadowColorUniform[1] = 0;
@@ -859,6 +873,8 @@ class TextElement {
             this._fontSize = this._maxFontSize;
         }
 
+        const justify = this._justify;
+
         const MAGIC = 32;
         const l = this._symbols.length;
 
@@ -874,6 +890,14 @@ class TextElement {
         let numCharsThisLine = 0;
         let numBreaksThisLine = 0;
 
+        // number of whitespace gaps between words seen so far on the current line, and the same
+        // count taken at the start of the current word - when a line wraps, the word being moved
+        // to the next line takes its gap with it, so the line we emit uses the latter
+        let numGapsThisLine = 0;
+        let numGapsAtWordStart = 0;
+        let prevWasWhitespace = false;
+        let seenNonWhitespaceThisLine = false;
+
         const splitHorizontalAnchors = Math.abs(this._element.anchor.x - this._element.anchor.z) >= 0.0001;
 
         let maxLineWidth = this._element.calculatedWidth;
@@ -886,8 +910,12 @@ class TextElement {
 
         let char, data, quad, nextchar;
 
-        function breakLine(symbols, lineBreakIndex, lineBreakX) {
+        // lineGaps is the number of gaps the line can be stretched at when justifying. It is 0 for
+        // lines that must not be justified - those ended by an explicit line break and the last
+        // line of the text - which makes them fall back to plain alignment.
+        function breakLine(symbols, lineBreakIndex, lineBreakX, lineGaps) {
             self._lineWidths.push(Math.abs(lineBreakX));
+            self._lineGaps.push(lineGaps);
             // in rtl mode lineStartIndex will usually be larger than lineBreakIndex and we will
             // need to adjust the start / end indices when calling symbols.slice()
             const sliceStart = lineStartIndex > lineBreakIndex ? lineBreakIndex + 1 : lineStartIndex;
@@ -918,6 +946,10 @@ class TextElement {
             numWordsThisLine = 0;
             numCharsThisLine = 0;
             numBreaksThisLine = 0;
+            numGapsThisLine = 0;
+            numGapsAtWordStart = 0;
+            prevWasWhitespace = false;
+            seenNonWhitespaceThisLine = false;
             wordStartX = 0;
             lineStartIndex = lineBreakIndex;
         }
@@ -938,6 +970,7 @@ class TextElement {
             this.height = 0;
             this._lineWidths = [];
             this._lineContents = [];
+            this._lineGaps = [];
 
             _x = 0;
             _y = 0;
@@ -951,6 +984,10 @@ class TextElement {
             numWordsThisLine = 0;
             numCharsThisLine = 0;
             numBreaksThisLine = 0;
+            numGapsThisLine = 0;
+            numGapsAtWordStart = 0;
+            prevWasWhitespace = false;
+            seenNonWhitespaceThisLine = false;
 
             const scale = this._fontSize / MAGIC;
 
@@ -991,7 +1028,8 @@ class TextElement {
                     numBreaksThisLine++;
                     // If we are not line wrapping then we should be ignoring maxlines
                     if (!this._wrapLines || this._maxLines < 0 || lines < this._maxLines) {
-                        breakLine(this._symbols, i, _xMinusTrailingWhitespace);
+                        // a line ended by an explicit line break is never justified
+                        breakLine(this._symbols, i, _xMinusTrailingWhitespace, 0);
                         wordStartIndex = i + 1;
                         lineStartIndex = i + 1;
                     }
@@ -1075,7 +1113,8 @@ class TextElement {
                         // broken onto multiple lines.
                         if (numWordsThisLine === 0) {
                             wordStartIndex = i;
-                            breakLine(this._symbols, i, _xMinusTrailingWhitespace);
+                            // a single word broken mid-word has no gaps to stretch
+                            breakLine(this._symbols, i, _xMinusTrailingWhitespace, 0);
                         } else {
                             // Move back to the beginning of the current word.
                             const backtrack = Math.max(i - wordStartIndex, 0);
@@ -1098,7 +1137,7 @@ class TextElement {
 
                             i -= backtrack + 1;
 
-                            breakLine(this._symbols, wordStartIndex, wordStartX);
+                            breakLine(this._symbols, wordStartIndex, wordStartX, numGapsAtWordStart);
                             continue;
                         }
                     }
@@ -1106,6 +1145,26 @@ class TextElement {
 
                 quad = meshInfo.quad;
                 meshInfo.lines[lines - 1] = quad;
+
+                // Count the whitespace gaps preceding this glyph on its line and record the count
+                // per quad. Justification shifts each glyph by the width of the gaps before it, and
+                // the quads of one line can be spread over several meshes when the font has more
+                // than one texture page, so the count cannot be recovered later from the line alone.
+                // Only tracked when justifying, which leaves every line with a gap count of zero
+                // otherwise - changing justify rebuilds the text, so this cannot go stale.
+                if (justify) {
+                    if (isWhitespace) {
+                        prevWasWhitespace = true;
+                    } else {
+                        if (prevWasWhitespace && seenNonWhitespaceThisLine) {
+                            numGapsThisLine++;
+                        }
+                        prevWasWhitespace = false;
+                        seenNonWhitespaceThisLine = true;
+                    }
+
+                    meshInfo.gapIndices[quad] = numGapsThisLine;
+                }
 
                 let left = _x - x;
                 let right = left + quadsize;
@@ -1179,6 +1238,7 @@ class TextElement {
                     numWordsThisLine++;
                     wordStartX = _xMinusTrailingWhitespace;
                     wordStartIndex = i + 1;
+                    numGapsAtWordStart = numGapsThisLine;
                 }
 
                 numCharsThisLine++;
@@ -1289,7 +1349,8 @@ class TextElement {
             // there will almost always be some leftover text on the final line which has
             // not yet been pushed to _lineContents.
             if (lineStartIndex < l) {
-                breakLine(this._symbols, l, _x);
+                // the last line of the text is never justified
+                breakLine(this._symbols, l, _x, 0);
             }
         }
 
@@ -1311,15 +1372,30 @@ class TextElement {
             let prevQuad = 0;
             for (const line in this._meshInfo[i].lines) {
                 const index = this._meshInfo[i].lines[line];
-                const lw = this._lineWidths[parseInt(line, 10)];
-                const hoffset = -hp * this._element.calculatedWidth + ha * (this._element.calculatedWidth - lw) * (this._rtl ? -1 : 1);
+                const lineIndex = parseInt(line, 10);
+                const lw = this._lineWidths[lineIndex];
+                const slack = this._element.calculatedWidth - lw;
+
+                // A justified line is flush with both edges of the element, so it ignores the
+                // horizontal alignment and spreads the space it has left over evenly between its
+                // words instead. Lines that must not be justified carry a gap count of 0 and so
+                // keep using the alignment.
+                const numGaps = justify ? this._lineGaps[lineIndex] : 0;
+                const justified = numGaps > 0 && slack > 0;
+                const gapWidth = justified ? slack / numGaps : 0;
+
+                const hoffset = -hp * this._element.calculatedWidth + (justified ? 0 : ha * slack * (this._rtl ? -1 : 1));
                 const voffset = (1 - vp) * this._element.calculatedHeight - fontMaxY - (1 - va) * (this._element.calculatedHeight - this.height);
 
                 for (let quad = prevQuad; quad <= index; quad++) {
-                    this._meshInfo[i].positions[quad * 4 * 3] += hoffset;
-                    this._meshInfo[i].positions[quad * 4 * 3 + 3] += hoffset;
-                    this._meshInfo[i].positions[quad * 4 * 3 + 6] += hoffset;
-                    this._meshInfo[i].positions[quad * 4 * 3 + 9] += hoffset;
+                    const qoffset = justified ?
+                        hoffset + gapWidth * this._meshInfo[i].gapIndices[quad] :
+                        hoffset;
+
+                    this._meshInfo[i].positions[quad * 4 * 3] += qoffset;
+                    this._meshInfo[i].positions[quad * 4 * 3 + 3] += qoffset;
+                    this._meshInfo[i].positions[quad * 4 * 3 + 6] += qoffset;
+                    this._meshInfo[i].positions[quad * 4 * 3 + 9] += qoffset;
 
                     this._meshInfo[i].positions[quad * 4 * 3 + 1] += voffset;
                     this._meshInfo[i].positions[quad * 4 * 3 + 4] += voffset;
@@ -1332,7 +1408,10 @@ class TextElement {
                     for (let quad = prevQuad; quad <= index; quad++) {
                         const idx = quad * 4 * 3;
 
-                        // flip the entire line horizontally
+                        // flip the entire line horizontally. This mirrors around the line offset,
+                        // so it must use hoffset and not the per-quad offset - the justification
+                        // gaps are already baked into the positions and the mirror has to reverse
+                        // their direction along with everything else on the line.
                         for (let vert = 0; vert < 4; ++vert) {
                             this._meshInfo[i].positions[idx + vert * 3] =
                                 this._element.calculatedWidth - this._meshInfo[i].positions[idx + vert * 3] + hoffset * 2;
@@ -1356,6 +1435,7 @@ class TextElement {
             const vertMax = this._meshInfo[i].quad * 4;  // number of verts we need (usually count minus line break characters)
             const it = new VertexIterator(this._meshInfo[i].meshInstance.mesh.vertexBuffer);
             for (let v = 0; v < numVertices; v++) {
+                it.element[SEMANTIC_NORMAL].set(0, 0, -1);
                 if (v >= vertMax) {
                     // clear unused vertices
                     it.element[SEMANTIC_POSITION].set(0, 0, 0);
@@ -1383,7 +1463,13 @@ class TextElement {
             }
             it.end();
 
-            this._meshInfo[i].meshInstance.mesh.aabb.compute(this._meshInfo[i].positions);
+            // bound only the vertices in use, the rest are cleared to the origin
+            const aabb = this._meshInfo[i].meshInstance.mesh.aabb;
+            if (vertMax > 0) {
+                aabb.compute(this._meshInfo[i].positions, vertMax);
+            } else {
+                aabb.setMinMax(Vec3.ZERO, Vec3.ZERO);
+            }
 
             // force update meshInstance aabb
             this._meshInfo[i].meshInstance._aabbVer = -1;
@@ -1578,6 +1664,9 @@ class TextElement {
                     mesh.primitive[0].base = start * 3 * 2;
                     mesh.primitive[0].count = (end - start) * 3 * 2;
                 }
+
+                // a texture page with no characters in the range would draw 0 indices, so skip it
+                instance.visible = end > start;
             }
         }
     }
@@ -1651,7 +1740,7 @@ class TextElement {
 
             for (let i = 0, len = this._model.meshInstances.length; i < len; i++) {
                 const mi = this._model.meshInstances[i];
-                mi.setParameter('material_emissive', this._colorUniform);
+                mi.setParameter('mesh_color', this._colorUniform);
             }
         }
 
@@ -1667,11 +1756,12 @@ class TextElement {
     set opacity(value) {
         if (this._color.a !== value) {
             this._color.a = value;
+            this._colorUniform[3] = value;
 
             if (this._model) {
                 for (let i = 0, len = this._model.meshInstances.length; i < len; i++) {
                     const mi = this._model.meshInstances[i];
-                    mi.setParameter('material_opacity', value);
+                    mi.setParameter('mesh_color', this._colorUniform);
                 }
             }
         }
@@ -1708,6 +1798,18 @@ class TextElement {
 
     get wrapLines() {
         return this._wrapLines;
+    }
+
+    set justify(value) {
+        const _prev = this._justify;
+        this._justify = value;
+        if (_prev !== value && this._font) {
+            this._updateText();
+        }
+    }
+
+    get justify() {
+        return this._justify;
     }
 
     get lines() {
@@ -1998,7 +2100,7 @@ class TextElement {
         }
 
         if (this._element) {
-            this._element.fire('set:outline', this._color);
+            this._element.fire('set:outline', this._outlineColor);
         }
     }
 

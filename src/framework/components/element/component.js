@@ -52,7 +52,7 @@ const tmpCorners = [new Vec3(), new Vec3(), new Vec3(), new Vec3()];
  * ElementComponent to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('element'); // This defaults to a 'group' element
  * ```
  *
@@ -60,12 +60,12 @@ const tmpCorners = [new Vec3(), new Vec3(), new Vec3(), new Vec3()];
  *
  * ```javascript
  * entity.addComponent('element', {
- *     anchor: new pc.Vec4(0.5, 0.5, 0.5, 0.5), // centered anchor
+ *     anchor: new Vec4(0.5, 0.5, 0.5, 0.5), // centered anchor
  *     fontAsset: fontAsset,
  *     fontSize: 128,
- *     pivot: new pc.Vec2(0.5, 0.5),            // centered pivot
+ *     pivot: new Vec2(0.5, 0.5),            // centered pivot
  *     text: 'Hello World!',
- *     type: pc.ELEMENTTYPE_TEXT
+ *     type: ELEMENTTYPE_TEXT
  * });
  * ```
  *
@@ -73,17 +73,25 @@ const tmpCorners = [new Vec3(), new Vec3(), new Vec3(), new Vec3()];
  * {@link Entity#element} property:
  *
  * ```javascript
- * entity.element.color = pc.Color.RED; // Set the element's color to red
+ * entity.element.color = Color.RED; // Set the element's color to red
  *
  * console.log(entity.element.color);   // Get the element's color and print it
  * ```
  *
  * Relevant Engine API examples:
  *
+ * - [Anchors](https://playcanvas.github.io/#/user-interface/anchors)
+ * - [Image fitting](https://playcanvas.github.io/#/user-interface/image-fit)
+ * - [Sliced panels](https://playcanvas.github.io/#/user-interface/panel)
+ * - [Masking](https://playcanvas.github.io/#/user-interface/masking)
+ * - [Rendering 3D into an image](https://playcanvas.github.io/#/user-interface/render-to-image)
+ * - [Custom shader](https://playcanvas.github.io/#/user-interface/custom-shader)
  * - [Basic text rendering](https://playcanvas.github.io/#/user-interface/text)
  * - [Auto font sizing](https://playcanvas.github.io/#/user-interface/text-auto-font-size)
  * - [Emojis](https://playcanvas.github.io/#/user-interface/text-emojis)
+ * - [Justified text](https://playcanvas.github.io/#/user-interface/text-justify)
  * - [Text localization](https://playcanvas.github.io/#/user-interface/text-localization)
+ * - [Text markup](https://playcanvas.github.io/#/user-interface/text-markup)
  * - [Typewriter text](https://playcanvas.github.io/#/user-interface/text-typewriter)
  *
  * @hideconstructor
@@ -163,9 +171,10 @@ class ElementComponent extends Component {
     static EVENT_MOUSEWHEEL = 'mousewheel';
 
     /**
-     * Fired when the mouse is pressed and released on the component or when a touch starts and
-     * ends on the component. Only fired when useInput is true. The handler is passed an
-     * {@link ElementMouseEvent} or {@link ElementTouchEvent}.
+     * Fired when the mouse is pressed and released on the component, when a touch starts and ends
+     * on the component, or when an XR input source starts and ends a select action on the
+     * component. Only fired when useInput is true. The handler is passed an
+     * {@link ElementMouseEvent}, {@link ElementTouchEvent} or {@link ElementSelectEvent}.
      *
      * @event
      * @example
@@ -222,6 +231,72 @@ class ElementComponent extends Component {
      * });
      */
     static EVENT_TOUCHCANCEL = 'touchcancel';
+
+    /**
+     * Fired when an XR input source starts a select action, such as pulling a controller trigger
+     * or pinching, while its ray points at the component. Only fired when useInput is true and
+     * the input source's {@link XrInputSource#elementInput} is true. The handler is passed an
+     * {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectstart', (event) => {
+     *     console.log(`Select start event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTSTART = 'selectstart';
+
+    /**
+     * Fired when an XR input source ends a select action that started on the component, even if
+     * its ray no longer points at the component. Only fired when useInput is true. The handler is
+     * passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectend', (event) => {
+     *     console.log(`Select end event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTEND = 'selectend';
+
+    /**
+     * Fired when the ray of an XR input source starts pointing at the component. Only fired when
+     * useInput is true and the input source's {@link XrInputSource#elementInput} is true. The
+     * handler is passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectenter', (event) => {
+     *     console.log(`Select enter event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTENTER = 'selectenter';
+
+    /**
+     * Fired when the ray of an XR input source stops pointing at the component, or when the input
+     * source is removed while its ray points at the component. Only fired when useInput is true.
+     * The handler is passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectleave', (event) => {
+     *     console.log(`Select leave event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTLEAVE = 'selectleave';
+
+    /**
+     * Fired every XR frame while an XR input source holds a select action that started on the
+     * component, even if its ray no longer points at the component. Only fired when useInput is
+     * true. The handler is passed an {@link ElementSelectEvent}.
+     *
+     * @event
+     * @example
+     * entity.element.on('selectmove', (event) => {
+     *     console.log(`Select move event on entity ${entity.name}`);
+     * });
+     */
+    static EVENT_SELECTMOVE = 'selectmove';
 
     /**
      * @type {EventHandle|null}
@@ -405,7 +480,7 @@ class ElementComponent extends Component {
      * will make the component resize exactly as its parent.
      *
      * @example
-     * this.entity.element.anchor = new pc.Vec4(Math.random() * 0.1, 0, 1, 0);
+     * this.entity.element.anchor = new Vec4(Math.random() * 0.1, 0, 1, 0);
      * @example
      * this.entity.element.anchor = [Math.random() * 0.1, 0, 1, 0];
      *
@@ -483,7 +558,8 @@ class ElementComponent extends Component {
 
     /**
      * Sets the distance from the bottom edge of the anchor. Can be used in combination with a
-     * split anchor to make the component's top edge always be 'top' units away from the top.
+     * split anchor to make the component's bottom edge always be 'bottom' units away from the
+     * bottom.
      *
      * @type {number}
      */
@@ -745,7 +821,7 @@ class ElementComponent extends Component {
      * @example
      * this.entity.element.pivot = [Math.random() * 0.1, Math.random() * 0.1];
      * @example
-     * this.entity.element.pivot = new pc.Vec2(Math.random() * 0.1, Math.random() * 0.1);
+     * this.entity.element.pivot = new Vec2(Math.random() * 0.1, Math.random() * 0.1);
      *
      * @type {Vec2 | number[]}
      */
@@ -892,7 +968,7 @@ class ElementComponent extends Component {
 
     /**
      * Sets the distance from the top edge of the anchor. Can be used in combination with a split
-     * anchor to make the component's bottom edge always be 'bottom' units away from the bottom.
+     * anchor to make the component's top edge always be 'top' units away from the top.
      *
      * @type {number}
      */
@@ -1264,8 +1340,8 @@ class ElementComponent extends Component {
 
     /**
      * Sets the color of the image for {@link ELEMENTTYPE_IMAGE} elements or the color of the text for
-     * {@link ELEMENTTYPE_TEXT} elements. Only the RGB channels are used; the alpha channel is ignored,
-     * so use {@link opacity} to control transparency.
+     * {@link ELEMENTTYPE_TEXT} elements, specified in sRGB color space. Only the RGB channels are
+     * used; the alpha channel is ignored, so use {@link opacity} to control transparency.
      *
      * @type {Color}
      */
@@ -1401,6 +1477,32 @@ class ElementComponent extends Component {
     get wrapLines() {
         if (this._text) {
             return this._text.wrapLines;
+        }
+
+        return null;
+    }
+
+    /**
+     * Sets whether wrapped lines are stretched to be flush with both edges of the element, by
+     * widening the gaps between their words. The last line of the text and any line ended by an
+     * explicit line break are not stretched, and follow {@link alignment} instead - as does a line
+     * with no gaps to widen. Only works for {@link ELEMENTTYPE_TEXT} elements, and only has an
+     * effect when {@link wrapLines} is set to true and the element has a fixed width.
+     *
+     * @type {boolean}
+     */
+    set justify(arg) {
+        this._setValue('justify', arg);
+    }
+
+    /**
+     * Gets whether wrapped lines are stretched to be flush with both edges of the element.
+     *
+     * @type {boolean}
+     */
+    get justify() {
+        if (this._text) {
+            return this._text.justify;
         }
 
         return null;
@@ -1859,7 +1961,8 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the text outline effect color and opacity. Only works for {@link ELEMENTTYPE_TEXT} elements.
+     * Sets the text outline effect color and opacity, with the color specified in sRGB color space.
+     * Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {Color}
      */
@@ -1904,7 +2007,8 @@ class ElementComponent extends Component {
     }
 
     /**
-     * Sets the text shadow effect color and opacity. Only works for {@link ELEMENTTYPE_TEXT} elements.
+     * Sets the text shadow effect color and opacity, with the color specified in sRGB color space.
+     * Only works for {@link ELEMENTTYPE_TEXT} elements.
      *
      * @type {Color}
      */
@@ -1937,7 +2041,7 @@ class ElementComponent extends Component {
      * @type {Vec2}
      * @example
      * // drop shadow, down and to the right of the text
-     * this.entity.element.shadowOffset = new pc.Vec2(0.25, -0.25);
+     * this.entity.element.shadowOffset = new Vec2(0.25, -0.25);
      */
     set shadowOffset(arg) {
         this._setValue('shadowOffset', arg);
@@ -2524,11 +2628,18 @@ class ElementComponent extends Component {
     }
 
     onLayersChanged(oldComp, newComp) {
-        this.addModelToLayers(this._image ? this._image._renderable.model : this._text._model);
-        oldComp.off('add', this.onLayerAdded, this);
-        oldComp.off('remove', this.onLayerRemoved, this);
-        newComp.on('add', this.onLayerAdded, this);
-        newComp.on('remove', this.onLayerRemoved, this);
+        // group elements have neither an image nor a text element
+        if (this._image) {
+            this.addModelToLayers(this._image._renderable.model);
+        } else if (this._text) {
+            this.addModelToLayers(this._text._model);
+        }
+
+        // store the new handles, so that onDisable can unsubscribe from the current composition
+        this._evtLayerAdded?.off();
+        this._evtLayerAdded = newComp.on('add', this.onLayerAdded, this);
+        this._evtLayerRemoved?.off();
+        this._evtLayerRemoved = newComp.on('remove', this.onLayerRemoved, this);
     }
 
     onLayerAdded(layer) {
@@ -2613,6 +2724,12 @@ class ElementComponent extends Component {
     }
 
     onBeforeRemove() {
+        // removing a component does not disable it first, so undo what onEnable set up. This runs
+        // before the image / text elements are destroyed below, as onDisable uses them.
+        if (this.enabled && this.entity.enabled) {
+            this.onDisable();
+        }
+
         this.entity.off('insert', this._onInsert, this);
         this._unpatch();
         if (this._image) {
