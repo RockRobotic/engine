@@ -1,27 +1,37 @@
-import { strict as assert } from 'node:assert';
-import { test } from 'node:test';
+import { expect } from 'chai';
 
 import { GSplatHandler } from '../../../src/framework/handlers/gsplat.js';
-import { Lcc2Parser } from '../../../src/framework/parsers/lcc2.js';
 
-function stubApp() {
-    return { assets: { on() {} } };
-}
+const stubApp = () => ({ assets: { on() {} } });
 
-test('GSplatHandler routes .lcc2 URLs to Lcc2Parser', () => {
+// The parser the handler would pick for a URL, by class name.
+const parserFor = (url) => {
     const handler = new GSplatHandler(stubApp());
-    const parser = handler._getParser('https://cdn.example.com/scenes/foo.lcc2');
-    assert.ok(parser instanceof Lcc2Parser, `expected Lcc2Parser, got ${parser?.constructor?.name}`);
-});
+    return handler._selectParser(handler._makeContext({ load: url, original: url }))?.constructor.name;
+};
 
-test('GSplatHandler ignores query string when dispatching', () => {
-    const handler = new GSplatHandler(stubApp());
-    const parser = handler._getParser('https://cdn.example.com/scenes/foo.lcc2?Signature=abc');
-    assert.ok(parser instanceof Lcc2Parser);
-});
+describe('GSplatHandler (ROCK fork)', function () {
 
-test('GSplatHandler still routes lod-meta.json to octree parser (regression)', () => {
-    const handler = new GSplatHandler(stubApp());
-    const parser = handler._getParser('https://cdn.example.com/scenes/lod-meta.json');
-    assert.equal(parser.constructor.name, 'GSplatOctreeParser');
+    it('routes .lcc2 URLs to Lcc2Parser', function () {
+        expect(parserFor('https://cdn.example.com/scenes/foo.lcc2')).to.equal('Lcc2Parser');
+    });
+
+    it('ignores the query string when dispatching', function () {
+        expect(parserFor('https://cdn.example.com/scenes/foo.lcc2?Signature=abc')).to.equal('Lcc2Parser');
+    });
+
+    it('still routes lod-meta.json to the octree parser', function () {
+        expect(parserFor('https://cdn.example.com/scenes/lod-meta.json')).to.equal('GSplatOctreeParser');
+    });
+
+    it('still routes .sog and .ply to their own parsers', function () {
+        expect(parserFor('https://cdn.example.com/scenes/foo.sog')).to.equal('SogBundleParser');
+        expect(parserFor('https://cdn.example.com/scenes/foo.ply')).to.equal('PlyParser');
+    });
+
+    it('gives the LCC2 parser the handler retry count', function () {
+        const handler = new GSplatHandler(stubApp());
+        const parser = handler._selectParser(handler._makeContext({ load: 'a.lcc2', original: 'a.lcc2' }));
+        expect(parser.handler).to.equal(handler);
+    });
 });

@@ -264,6 +264,27 @@ describe('AssetRegistry', function () {
             });
         });
 
+        it('waits for GLB meshes before reporting a referenced render asset ready', async function () {
+            const container = new Asset('container', 'container', { url: `${assetPath}test.glb` });
+            const render = new Asset('render', 'render', null, {
+                containerAsset: container.id,
+                renderIndex: 0
+            });
+            app.assets.add(container);
+            app.assets.add(render);
+
+            const ready = new Promise((resolve, reject) => {
+                render.ready(resolve);
+                render.once('error', reject);
+            });
+            app.assets.load(render);
+            await ready;
+
+            expect(container.loaded).to.equal(true);
+            expect(render.resource.meshes).to.be.an('array').that.is.not.empty;
+            expect(render.resource.meshes).to.equal(container.resource.renders[0].resource.meshes);
+        });
+
         it('supports retry loading of container assets', (done) => {
             spy(http, 'request');
             app.loader.enableRetry(2);
@@ -365,6 +386,65 @@ describe('AssetRegistry', function () {
 
             expect(assets[0].id).to.equal(asset1.id);
             expect(assets[1].id).to.equal(asset3.id);
+        });
+
+    });
+
+    describe('#destroy', function () {
+
+        it('empties the registry and clears asset references to it', function () {
+            const asset = new Asset('Asset', 'text', {
+                url: 'fake/one/file.txt'
+            });
+            asset.tags.add('tag');
+
+            const registry = new AssetRegistry(new ResourceLoader(app));
+            registry.add(asset);
+            registry.destroy();
+
+            expect(registry.list().length).to.equal(0);
+            expect(registry.get(asset.id)).to.be.undefined;
+            expect(registry.getByUrl('fake/one/file.txt')).to.be.undefined;
+            expect(asset.registry).to.be.null;
+        });
+
+        it('unsubscribes from asset name and tag changes', function () {
+            const asset = new Asset('Asset', 'text', {
+                url: 'fake/one/file.txt'
+            });
+
+            const registry = new AssetRegistry(new ResourceLoader(app));
+            registry.add(asset);
+            registry.destroy();
+
+            // a still subscribed tag handler throws on the released tags cache, and a still
+            // subscribed name handler repopulates the name index
+            asset.tags.add('tag');
+            asset.tags.remove('tag');
+            asset.name = 'Renamed Asset';
+
+            expect(registry.find('Renamed Asset')).to.be.null;
+        });
+
+        it('leaves a registry reference which belongs to another registry', function () {
+            const asset = new Asset('Asset', 'text', {
+                url: 'fake/one/file.txt'
+            });
+
+            const registry = new AssetRegistry(new ResourceLoader(app));
+            registry.add(asset);
+
+            // the asset now belongs to the other registry, which is still live
+            const other = new AssetRegistry(new ResourceLoader(app));
+            other.add(asset);
+
+            registry.destroy();
+
+            expect(asset.registry).to.equal(other);
+            expect(other.get(asset.id)).to.equal(asset);
+
+            other.destroy();
+            expect(asset.registry).to.be.null;
         });
 
     });

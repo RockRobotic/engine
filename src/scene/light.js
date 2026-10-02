@@ -1,3 +1,4 @@
+import { Debug } from '../core/debug.js';
 import { math } from '../core/math/math.js';
 import { Color } from '../core/math/color.js';
 import { Mat4 } from '../core/math/mat4.js';
@@ -21,12 +22,12 @@ import { DepthState } from '../platform/graphics/depth-state.js';
 import { FloatPacking } from '../core/math/float-packing.js';
 
 /**
+ * @import { BoundingBox } from '../core/shape/bounding-box.js'
  * @import { GraphicsDevice } from '../platform/graphics/graphics-device.js'
  * @import { EventHandle } from '../core/event-handle.js';
  */
 
 /**
- * @import { BindGroup } from '../platform/graphics/bind-group.js'
  * @import { Layer } from './layer.js'
  */
 
@@ -65,7 +66,9 @@ const channelMap = {
 let id = 0;
 
 /**
- * Class storing shadow rendering related private information
+ * Class storing shadow rendering related private information.
+ *
+ * @ignore
  */
 class LightRenderData {
     constructor(camera, face, light) {
@@ -100,21 +103,20 @@ class LightRenderData {
         // - directional: 0 for simple shadows, cascade index for cascaded shadow map
         this.face = face;
 
+        // Face 0 stores the cull request: per camera for directional lights, or with a null camera
+        // for local lights. Retained until the next frame so mesh and splat culling share requests.
+        this.shadowCullRequested = false;
+
+        // On directional face 0, the cascades requested by this camera's scheduled shadow passes.
+        this.shadowCascadeMask = 0;
+
+        // Retain PCSS caster bounds so cached cascades remain part of the depth-fitting union.
+        /** @type {BoundingBox|null} */
+        this.shadowCasterAabb = null;
+        this.shadowCasterAabbValid = false;
+
         // visible shadow casters
         this.visibleCasters = [];
-
-        // an array of view bind groups, single entry is used for shadows
-        /** @type {BindGroup[]} */
-        this.viewBindGroups = [];
-    }
-
-    // releases GPU resources
-    destroy() {
-        this.viewBindGroups.forEach((bg) => {
-            bg.defaultUniformBuffer.destroy();
-            bg.destroy();
-        });
-        this.viewBindGroups.length = 0;
     }
 
     // returns shadow buffer currently attached to the shadow camera
@@ -154,6 +156,14 @@ class Light {
      * @type {DepthState}
      */
     shadowDepthState = DepthState.DEFAULT.clone();
+
+    /**
+     * A multiplier of the light's contribution to the volumetric fog. Only used by omni and spot
+     * lights, when the volumetric fog renders local lights.
+     *
+     * @type {number}
+     */
+    volumetricScattering = 1;
 
     /**
      * The flags used for clustered lighting. Stored as a bitfield, updated as properties change to
@@ -260,12 +270,16 @@ class Light {
 
         // Shadow mapping resources
         this._shadowMap = null;
+
+        // Keep a recreated directional map's refresh pending even when the application replaces
+        // shadowUpdateOverrides each frame. Cleared only after all cascades have rendered.
+        this._shadowCascadesInvalidated = false;
         this._shadowRenderParams = [];
         this._shadowCameraParams = [];
 
-        // per-cascade ortho radii for directional PCSS, packed into a vec4 (max 4 cascades).
-        // lazily allocated by the renderer only for directional lights that use PCSS.
-        this._shadowCascadeRadii = null;
+        // Per-cascade camera parameters for directional PCSS, packed into four vec4s.
+        // Lazily allocated by the renderer only for directional lights that use PCSS.
+        this._shadowCascadeParams = null;
 
         // Shadow mapping properties
         this.shadowDistance = 40;
@@ -331,10 +345,6 @@ class Light {
     releaseRenderData() {
 
         if (this._renderData) {
-            for (let i = 0; i < this._renderData.length; i++) {
-                this._renderData[i].destroy();
-            }
-
             this._renderData.length = 0;
         }
     }
@@ -411,6 +421,11 @@ class Light {
     }
 
     set mask(value) {
+
+        // the mask of a mesh instance holds 8 bits, so only these can match, see MeshInstance#mask
+        Debug.assert((value & ~0xff) === 0, `Light#mask ${value} does not fit the 8 bits of the light mask`);
+        value &= 0xff;
+
         if (this._mask !== value) {
             this._mask = value;
             this.updateKey();
@@ -843,6 +858,9 @@ class Light {
         this.releaseRenderData();
 
         if (this._shadowMap) {
+            if (this._type === LIGHTTYPE_DIRECTIONAL) {
+                this._shadowCascadesInvalidated = true;
+            }
             if (!this._shadowMap.cached) {
                 this._shadowMap.destroy();
             }
@@ -935,6 +953,9 @@ class Light {
         clone.shadowBlockerSamples = this.shadowBlockerSamples;
         clone.penumbraSize = this.penumbraSize;
         clone.penumbraFalloff = this.penumbraFalloff;
+
+        // volumetric properties
+        clone.volumetricScattering = this.volumetricScattering;
 
         // Cookies properties
         // clone.cookie = this._cookie;
@@ -1033,7 +1054,7 @@ class Light {
             sphere.center.add2(node.getPosition(), tmpVec);
 
         } else if (this._type === LIGHTTYPE_OMNI) {
-            sphere.center = this._node.getPosition();
+            sphere.center.copy(this._node.getPosition());
             sphere.radius = this.attenuationEnd;
         }
     }
@@ -1153,7 +1174,7 @@ class Light {
                (chanId[this._cookieChannel.charAt(0)]     << 18) |
                ((this._cookieTransform ? 1 : 0)           << 12) |
                ((this._shape)                             << 10) |
-               ((this.numCascades > 0 ? 1 : 0)            <<  9) |
+               ((this.numCascades > 1 ? 1 : 0)            <<  9) |
                ((this._cascadeBlend > 0 ? 1 : 0)          <<  8) |
                ((this.affectSpecularity ? 1 : 0)          <<  7) |
                ((this.mask)                               <<  6) |
@@ -1243,4 +1264,4 @@ class Light {
     }
 }
 
-export { Light, lightTypes };
+export { Light, LightRenderData, lightTypes };

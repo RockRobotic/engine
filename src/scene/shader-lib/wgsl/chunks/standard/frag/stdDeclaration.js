@@ -2,6 +2,11 @@
 // by the fragment shader of the standard shader.
 export default /* wgsl */`
 
+    #ifdef MESH_COLOR
+        // Linear RGB replaces material emission; alpha replaces material opacity.
+        uniform mesh_color: vec4f;
+    #endif
+
     // globals
     var<private> dAlpha: f32 = 1.0;
 
@@ -21,9 +26,17 @@ export default /* wgsl */`
         var<private> dSpecularity: vec3f = vec3f(0.0, 0.0, 0.0);
         var<private> dGlossiness: f32 = 0.0;
 
+        // the ambient color of the material
+        uniform material_ambient: vec3f;
+
         #ifdef LIT_REFRACTION
             var<private> dTransmission: f32;
             var<private> dThickness: f32;
+
+            // ior, unless it is declared by the metalness path below
+            #ifndef LIT_METALNESS
+                var<private> dIor: f32;
+            #endif
         #endif
 
         #ifdef LIT_SCENE_COLOR
@@ -32,17 +45,24 @@ export default /* wgsl */`
         #endif
 
         #ifdef LIT_SCREEN_SIZE
-            uniform uScreenSize: vec4f;
+            uniform screen_size: vec4f;
         #endif
 
         #ifdef LIT_TRANSFORMS
             var<private> matrix_viewProjection: mat4x4f;
-            var<private> matrix_model: mat4x4f;
         #endif
 
         // parallax
         #ifdef STD_HEIGHT_MAP
             var<private> dUvOffset: vec2f;
+            #ifdef STD_PARALLAX_SELF_SHADOW
+                // The depth the view ray hit the height field at, and the mip level the march read.
+                // Both are carried to the per light self shadow march, which starts where the
+                // shading does. The depth already has the distance fade applied, so it reaches zero
+                // with the fade and the shadow goes with it.
+                var<private> dParallaxHitDepth: f32;
+                var<private> dParallaxLod: f32;
+            #endif
             #ifdef STD_HEIGHT_TEXTURE_ALLOCATE
                 var texture_heightMap : texture_2d<f32>;
                 var texture_heightMapSampler : sampler;
@@ -107,8 +127,8 @@ export default /* wgsl */`
             var<private> dAnisotropyRotation: vec2f;
         #endif
 
-        // specularity & glossiness
-        #ifdef LIT_SPECULAR_OR_REFLECTION
+        // specularity & glossiness (also needed by refraction, which uses specularity and gloss)
+        #if defined(LIT_SPECULAR_OR_REFLECTION) || defined(LIT_REFRACTION)
 
             // sheen
             #ifdef LIT_SHEEN
@@ -209,8 +229,8 @@ export default /* wgsl */`
         #if defined(STD_LIGHTMAP) || defined(STD_LIGHT_VERTEX_COLOR)
             var<private> dLightmap: vec3f;
             #ifdef STD_LIGHT_TEXTURE_ALLOCATE
-                var texture_lightMap : texture_2d<f32>;
-                var texture_lightMapSampler : sampler;
+                var {STD_LIGHT_TEXTURE_NAME} : texture_2d<f32>;
+                var {STD_LIGHT_TEXTURE_NAME}Sampler : sampler;
             #endif
         #endif
     #endif

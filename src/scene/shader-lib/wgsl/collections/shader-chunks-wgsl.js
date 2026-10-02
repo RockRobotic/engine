@@ -37,7 +37,9 @@ import envAtlasPS from '../chunks/common/frag/envAtlas.js';
 import envProcPS from '../chunks/common/frag/envProc.js';
 import falloffInvSquaredPS from '../chunks/lit/frag/falloffInvSquared.js';
 import falloffLinearPS from '../chunks/lit/frag/falloffLinear.js';
+import flatNormalPS from '../chunks/common/frag/flat-normal.js';
 import floatAsUintPS from '../chunks/common/frag/float-as-uint.js';
+import sceneTexturesPS from '../chunks/common/frag/scene-textures.js';
 import fogPS from '../chunks/common/frag/fog.js';
 import fogMathPS from '../chunks/common/shared/fogMath.js';
 import fresnelSchlickPS from '../chunks/lit/frag/fresnelSchlick.js';
@@ -78,6 +80,7 @@ import litShaderArgsPS from '../chunks/standard/frag/litShaderArgs.js';
 import litShaderCorePS from '../chunks/standard/frag/litShaderCore.js';
 import litShadowMainPS from '../chunks/lit/frag/pass-shadow/litShadowMain.js';
 import ltcPS from '../chunks/lit/frag/ltc.js';
+import meshInstanceStorageVS from '../chunks/common/vert/meshInstanceStorage.js';
 import metalnessPS from '../chunks/standard/frag/metalness.js';
 import msdfPS from '../chunks/common/frag/msdf.js';
 import metalnessModulatePS from '../chunks/lit/frag/metalnessModulate.js';
@@ -89,6 +92,8 @@ import normalCoreVS from '../chunks/common/vert/normalCore.js';
 import normalMapPS from '../chunks/standard/frag/normalMap.js';
 import opacityPS from '../chunks/standard/frag/opacity.js';
 import opacityDitherPS from '../chunks/standard/frag/opacity-dither.js';
+import outlineDeclarationPS from '../chunks/lit/frag/outline-declaration.js';
+import outlineOutputPS from '../chunks/lit/frag/outline-output.js';
 import outputPS from '../chunks/lit/frag/output.js';
 import outputAlphaPS from '../chunks/lit/frag/outputAlpha.js';
 import outputTex2DPS from '../chunks/common/frag/outputTex2D.js';
@@ -110,6 +115,7 @@ import reprojectPS from '../chunks/internal/frag/reproject.js';
 import reprojectVS from '../chunks/internal/vert/reproject.js';
 import screenDepthPS from '../chunks/common/frag/screenDepth.js';
 import shadowCascadesPS from '../chunks/lit/frag/lighting/shadowCascades.js';
+import shadowCasterPS from '../chunks/common/frag/shadow-caster.js';
 import shadowEVSMPS from '../chunks/lit/frag/lighting/shadowEVSM.js';
 import shadowPCF1PS from '../chunks/lit/frag/lighting/shadowPCF1.js';
 import shadowPCF3PS from '../chunks/lit/frag/lighting/shadowPCF3.js';
@@ -146,6 +152,9 @@ import transmissionPS from '../chunks/standard/frag/transmission.js';
 import twoSidedLightingPS from '../chunks/lit/frag/twoSidedLighting.js';
 import uv0VS from '../chunks/lit/vert/uv0.js';
 import uv1VS from '../chunks/lit/vert/uv1.js';
+import uvSetAttributeVS from '../chunks/lit/vert/uvSetAttribute.js';
+import uvSetVS from '../chunks/lit/vert/uvSet.js';
+import uvSetVaryingVS from '../chunks/lit/vert/uvSetVarying.js';
 import uvTransformVS from '../chunks/lit/vert/uvTransform.js';
 import uvTransformUniformsPS from '../chunks/lit/vert/uvTransformUniforms.js';
 import viewDirPS from '../chunks/lit/frag/viewDir.js';
@@ -199,7 +208,9 @@ const shaderChunksWGSL = {
     envProcPS,
     falloffInvSquaredPS,
     falloffLinearPS,
+    flatNormalPS,
     floatAsUintPS,
+    sceneTexturesPS,
     fogPS,
     fogMathPS,
     fresnelSchlickPS,
@@ -250,6 +261,7 @@ const shaderChunksWGSL = {
     litUserMainEndPS: '',  // empty chunk allowing user to add custom code
     litUserMainEndVS: '',  // empty chunk allowing user to add custom code
     ltcPS,
+    meshInstanceStorageVS,
     metalnessPS,
     metalnessModulatePS,
     morphPS,
@@ -261,6 +273,8 @@ const shaderChunksWGSL = {
     normalMapPS,
     opacityPS,
     opacityDitherPS,
+    outlineDeclarationPS,
+    outlineOutputPS,
     outputPS,
     outputAlphaPS,
     outputTex2DPS,
@@ -282,6 +296,7 @@ const shaderChunksWGSL = {
     reprojectVS,
     screenDepthPS,
     shadowCascadesPS,
+    shadowCasterPS,
     shadowEVSMPS,
     shadowPCF1PS,
     shadowPCF3PS,
@@ -318,6 +333,9 @@ const shaderChunksWGSL = {
     twoSidedLightingPS,
     uv0VS,
     uv1VS,
+    uvSetAttributeVS,
+    uvSetVS,
+    uvSetVaryingVS,
     uvTransformVS,
     uvTransformUniformsPS,
     viewDirPS,

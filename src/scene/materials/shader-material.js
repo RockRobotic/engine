@@ -5,6 +5,7 @@ import { SHADERDEF_INSTANCING, SHADERDEF_MORPH_NORMAL, SHADERDEF_MORPH_POSITION,
 import { getProgramLibrary } from '../shader-lib/get-program-library.js';
 import { shaderGeneratorShader } from '../shader-lib/programs/shader-generator-shader.js';
 import { ShaderUtils } from '../shader-lib/shader-utils.js';
+import { ShaderPass } from '../shader-pass.js';
 import { Material } from './material.js';
 
 /**
@@ -29,13 +30,23 @@ import { Material } from './material.js';
 /**
  * A ShaderMaterial is a type of material that utilizes a specified shader for rendering purposes.
  *
+ * Use it when a surface cannot be expressed with {@link StandardMaterial} properties or shader
+ * chunk overrides. The shader is described by a {@link ShaderDesc}: a `uniqueName`, vertex and
+ * fragment source in GLSL for WebGL, in WGSL for WebGPU, or both, and an `attributes` map from
+ * shader inputs to `SEMANTIC_*` values so the engine can bind vertex data. Provide both languages
+ * when the application must run on both backends. The engine supplies the standard uniforms a
+ * shader declares by name, such as `matrix_viewProjection`; your own uniforms are set with
+ * {@link Material#setParameter}. Render state such as {@link Material#blendType},
+ * {@link Material#cull} and {@link Material#depthWrite} comes from {@link Material}. Lighting, fog
+ * and shadows are not generated for you; the shader draws exactly what it is written to draw.
+ *
  * A simple example which creates a material with custom vertex and fragment shaders specified in
  * GLSL format:
  *
  * ```javascript
- * const material = new pc.ShaderMaterial({
+ * const material = new ShaderMaterial({
  *     uniqueName: 'MyShader',
- *     attributes: { aPosition: pc.SEMANTIC_POSITION },
+ *     attributes: { aPosition: SEMANTIC_POSITION },
  *     vertexGLSL: `
  *         attribute vec3 aPosition;
  *         uniform mat4 matrix_viewProjection;
@@ -66,6 +77,10 @@ class ShaderMaterial extends Material {
      */
     constructor(shaderDesc) {
         super();
+
+        // the shader is supplied by the user, so by default it is not expected to generate the scene
+        // textures - a material whose shader does needs to opt in
+        this.sceneTexturesWrite = false;
 
         this.shaderDesc = shaderDesc;
     }
@@ -128,9 +143,11 @@ class ShaderMaterial extends Material {
         return this;
     }
 
+    /** @ignore */
     getShaderVariant(params) {
 
         const { objDefs } = params;
+        const shaderPassInfo = ShaderPass.get(params.device).getByIndex(params.pass);
         const options = {
             defines: ShaderUtils.getCoreDefines(this, params),
             skin: (objDefs & SHADERDEF_SKIN) !== 0,
@@ -143,11 +160,12 @@ class ShaderMaterial extends Material {
             gamma: params.cameraShaderParams.shaderOutputGamma,
             toneMapping: params.cameraShaderParams.toneMapping,
             fog: params.cameraShaderParams.fog,
+            useDualSourceBlending: shaderPassInfo.isForward && this.blendState.usesDualSourceBlending,
             shaderDesc: this.shaderDesc,
             shaderChunks: this.shaderChunks // override chunks from the material
         };
 
-        const processingOptions = new ShaderProcessorOptions(params.viewUniformFormat, params.viewBindGroupFormat, params.vertexFormat);
+        const processingOptions = new ShaderProcessorOptions(params.viewUniformFormat, params.vertexFormat);
 
         const library = getProgramLibrary(params.device);
         library.register('shader-material', shaderGeneratorShader);

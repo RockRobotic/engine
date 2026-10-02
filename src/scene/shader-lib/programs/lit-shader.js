@@ -1,10 +1,12 @@
 import {
     SEMANTIC_ATTR8, SEMANTIC_ATTR9, SEMANTIC_ATTR12, SEMANTIC_ATTR11, SEMANTIC_ATTR14, SEMANTIC_ATTR15,
     SEMANTIC_BLENDINDICES, SEMANTIC_BLENDWEIGHT, SEMANTIC_COLOR, SEMANTIC_NORMAL, SEMANTIC_POSITION, SEMANTIC_TANGENT,
-    SEMANTIC_TEXCOORD0, SEMANTIC_TEXCOORD1,
+    SEMANTIC_TEXCOORD0, SEMANTIC_TEXCOORD1, SEMANTIC_TEXCOORD2, SEMANTIC_TEXCOORD3,
+    SEMANTIC_TEXCOORD4, SEMANTIC_TEXCOORD5, SEMANTIC_TEXCOORD6, SEMANTIC_TEXCOORD7,
     SHADERLANGUAGE_GLSL,
     SHADERLANGUAGE_WGSL,
-    primitiveGlslToWgslTypeMap
+    primitiveGlslToWgslTypeMap,
+    semanticToLocation
 } from '../../../platform/graphics/constants.js';
 import {
     LIGHTSHAPE_PUNCTUAL,
@@ -32,6 +34,12 @@ const builtinAttributes = {
     vertex_tangent: SEMANTIC_TANGENT,
     vertex_texCoord0: SEMANTIC_TEXCOORD0,
     vertex_texCoord1: SEMANTIC_TEXCOORD1,
+    vertex_texCoord2: SEMANTIC_TEXCOORD2,
+    vertex_texCoord3: SEMANTIC_TEXCOORD3,
+    vertex_texCoord4: SEMANTIC_TEXCOORD4,
+    vertex_texCoord5: SEMANTIC_TEXCOORD5,
+    vertex_texCoord6: SEMANTIC_TEXCOORD6,
+    vertex_texCoord7: SEMANTIC_TEXCOORD7,
     vertex_color: SEMANTIC_COLOR,
     vertex_boneWeights: SEMANTIC_BLENDWEIGHT,
     vertex_boneIndices: SEMANTIC_BLENDINDICES
@@ -138,8 +146,9 @@ class LitShader {
 
             userChunkMap.forEach((chunk, chunkName) => {
 
-                // extract attribute names from the used chunk
-                Debug.assert(chunk);
+                // extract attribute names from the used chunk. An empty chunk is valid - it is how a
+                // chunk gets blanked out - so only a missing one is a mistake
+                Debug.assert(typeof chunk === 'string', `Shader chunk [${chunkName}] is not a string.`);
                 for (const a in builtinAttributes) {
                     if (builtinAttributes.hasOwnProperty(a) && chunk.indexOf(a) >= 0) {
                         this.attributes[a] = builtinAttributes[a];
@@ -159,6 +168,7 @@ class LitShader {
         this.needsNormal =
             this.lighting ||
             this.reflections ||
+            options.useRefraction ||
             options.useSpecular ||
             options.ambientSH ||
             options.useHeights ||
@@ -232,6 +242,13 @@ class LitShader {
             varyings.set('vLinearDepth', 'float');
         }
 
+        // dynamic refraction, evaluated by the forward pass, scales the refraction by the scale of
+        // the model matrix
+        if (options.useRefraction && options.useDynamicRefraction && this.shaderPassInfo.isForward) {
+            vDefines.set('LIT_DYNAMIC_REFRACTION', true);
+            varyings.set('vModelScale', 'vec3');
+        }
+
         if (this.needsNormal) vDefines.set('NORMALS', true);
 
         if (this.options.useInstancing) {
@@ -265,17 +282,30 @@ class LitShader {
             }
         }
 
-        const maxUvSets = 2;
-        for (let i = 0; i < maxUvSets; i++) {
+        // uv sets 0 and 1 have dedicated chunks (uv0VS handles nine-slicing), the additional sets
+        // are expanded by looped includes indexed through the UV_SET defines
+        let numUvSets = 0;
+        let numUvVaryings = 0;
+        for (let i = 0; i < useUv.length; i++) {
             if (useUv[i]) {
                 vDefines.set(`UV${i}`, true);
                 attributes[`vertex_texCoord${i}`] = `TEXCOORD${i}`;
+                if (i >= 2) {
+                    vDefines.set(`{UV_SET_${numUvSets++}}`, i);
+                }
             }
             if (useUnmodifiedUv[i]) {
                 vDefines.set(`UV${i}_UNMODIFIED`, true);
                 varyings.set(`vUv${i}`, 'vec2');
+                if (i >= 2) {
+                    vDefines.set(`{UV_VARYING_SET_${numUvVaryings++}}`, i);
+                }
             }
         }
+
+        // number of additional uv sets, these drive the looped includes
+        vDefines.set('UV_SET_COUNT', numUvSets);
+        vDefines.set('UV_VARYING_SET_COUNT', numUvVaryings);
 
         // prepare defines for texture transforms
         let numTransforms = 0;
@@ -344,6 +374,19 @@ class LitShader {
             }
         }
 
+        // attribute locations are fixed per semantic, so two attributes on one location cannot share
+        // a shader. UV sets 6 and 7 sit on the locations of the default instancing format and UV
+        // sets 3 and 4 on those of the MSDF text attributes.
+        Debug.call(() => {
+            const used = new Map();
+            for (const name in attributes) {
+                const location = semanticToLocation[attributes[name]];
+                Debug.assert(!used.has(location),
+                    `Vertex attributes ${used.get(location)} and ${name} both use attribute location ${location} and cannot be combined in one shader. UV sets 6 and 7 share their locations with the default instancing vertex format, UV sets 3 and 4 with the MSDF text attributes - use a custom instancing vertex format or a different UV set.`);
+                used.set(location, name);
+            }
+        });
+
         // object level defines, exposed to both vertex and fragment shaders
         this.sharedDefineSet(options.useInstancing, 'INSTANCING', true);
         this.sharedDefineSet(options.screenSpace, 'SCREENSPACE', true);
@@ -398,9 +441,14 @@ class LitShader {
             }
         }
 
-        // generate defines for all non-clustered lights
+        // generate defines for all non-clustered lights. options.lights is indexed by light slot
+        // and is sparse: a slot reserved by a light this mask does not select is a hole, and gets
+        // no defines, so the `#if defined(LIGHT<N>)` in the repeated light chunks compiles that
+        // slot out of both the declarations and the lighting code.
         for (let i = 0; i < options.lights.length; i++) {
             const light = options.lights[i];
+            if (!light) continue;
+
             const lightType = light._type;
 
             // when clustered lighting is enabled, skip non-directional lights
@@ -466,7 +514,9 @@ class LitShader {
             return light._shape && light._shape !== LIGHTSHAPE_PUNCTUAL;
         });
         const addAmbient = !options.lightMapEnabled || options.lightMapWithoutAmbient;
-        const hasTBN = this.needsNormal && (options.useNormals || options.useClearCoatNormals || (options.enableGGXSpecular && !options.useHeights));
+        // parallax mapping transforms the view direction to tangent space, so it needs the TBN matrix
+        // as well
+        const hasTBN = this.needsNormal && (options.useNormals || options.useClearCoatNormals || options.useHeights || options.enableGGXSpecular);
 
         if (options.useSpecular) {
             this.fDefineSet(true, 'LIT_SPECULAR');
@@ -528,6 +578,10 @@ class LitShader {
         this.fDefineSet(true, '{reflectionCubemapDecode}', ChunkUtils.decodeFunc(options.reflectionCubemapEncoding));
         this.fDefineSet(true, '{ambientDecode}', ChunkUtils.decodeFunc(options.ambientEncoding));
 
+        // environment textures are owned by the scene or by the material, under different uniform names
+        this.fDefineSet(true, '{LIT_ENV_ATLAS}', options.useSceneEnv ? 'scene_envAtlas' : 'texture_envAtlas');
+        this.fDefineSet(true, '{LIT_ENV_CUBEMAP}', options.useSceneEnv ? 'scene_skybox' : 'texture_cubeMap');
+
         // lighting defines
         this._setupLightingDefines(hasAreaLights, options.clusteredLightingEnabled);
     }
@@ -540,22 +594,10 @@ class LitShader {
 
     prepareShadowPass() {
 
+        // Note: LIGHT_TYPE, SHADOW_TYPE and PERSPECTIVE_DEPTH defines are generated by the
+        // ShaderPassInfo of the shadow pass, and are supplied by the material options.defines
+
         const { options } = this;
-        const lightType = this.shaderPassInfo.lightType;
-
-        const shadowType = this.shaderPassInfo.shadowType;
-        const shadowInfo = shadowTypeInfo.get(shadowType);
-        Debug.assert(shadowInfo);
-
-        // Use perspective depth for:
-        // - Directional: Always since light has no position
-        // - Spot: If not using VSM
-        // - Point: Never
-        const usePerspectiveDepth = (lightType === LIGHTTYPE_DIRECTIONAL || (!shadowInfo.vsm && lightType === LIGHTTYPE_SPOT));
-
-        this.fDefineSet(usePerspectiveDepth, 'PERSPECTIVE_DEPTH');
-        this.fDefineSet(true, 'LIGHT_TYPE', `${lightTypeNames[lightType]}`);
-        this.fDefineSet(true, 'SHADOW_TYPE', `${shadowInfo.name}`);
         this.fDefineSet(options.alphaTest, 'LIT_ALPHA_TEST');
     }
 

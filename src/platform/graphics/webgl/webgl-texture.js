@@ -172,9 +172,6 @@ class WebglTexture {
             case PIXELFORMAT_SBGRA8:
                 Debug.error('BGRA8 and SBGRA8 texture formats are not supported by WebGL.');
                 break;
-            case PIXELFORMAT_RG32F:
-                Debug.error('RG32F texture format is not supported by WebGL.');
-                break;
             case PIXELFORMAT_RGB9E5:
                 this._glFormat = gl.RGB;
                 this._glInternalFormat = gl.RGB9_E5;
@@ -336,6 +333,11 @@ class WebglTexture {
                 this._glInternalFormat = gl.R32F;
                 this._glPixelType = gl.FLOAT;
                 break;
+            case PIXELFORMAT_RG32F:
+                this._glFormat = gl.RG;
+                this._glInternalFormat = gl.RG32F;
+                this._glPixelType = gl.FLOAT;
+                break;
             case PIXELFORMAT_DEPTH:
                 this._glFormat = gl.DEPTH_COMPONENT;
                 this._glInternalFormat = gl.DEPTH_COMPONENT32F;
@@ -476,7 +478,7 @@ class WebglTexture {
         Debug.assert(texture.device, 'Attempting to use a texture that has been destroyed.', texture);
         const gl = device.gl;
 
-        if (!texture._needsUpload && ((texture._needsMipmapsUpload && texture._mipmapsUploaded) || !texture.pot)) {
+        if (!texture._needsUpload && texture._needsMipmapsUpload && texture._mipmapsUploaded) {
             return;
         }
 
@@ -868,6 +870,12 @@ class WebglTexture {
      */
     uploadImmediate(device, texture) {
 
+        // Downloads can complete during context loss. Keep the upload pending so its source
+        // survives and a valid GPU texture is created when it is next used after recovery.
+        if (device.isContextLost()) {
+            return;
+        }
+
         if (texture._needsUpload || texture._needsMipmapsUpload) {
 
             // this uploads the texture as well
@@ -893,6 +901,10 @@ class WebglTexture {
         // ensure texture is created and bound
         device.setTexture(texture, 0);
         return device.writeTextureAsync(texture, x, y, width, height, data);
+    }
+
+    copy(source, options) {
+        return this.texture.device.copyTextureToTexture(source, this.texture, options);
     }
 }
 

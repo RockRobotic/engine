@@ -4,6 +4,22 @@ import { ScriptComponent } from './component.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Entity } from '../../entity.js'
+ */
+
+/**
+ * Options of the `script` component accepted by {@link ScriptComponentSystem} that differ from the
+ * properties of {@link ScriptComponent}. Each replaces the same-named property of the options that
+ * {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} ScriptComponentOptionsOverrides
+ * @property {string[]} [order] - Names of the scripts to create, in execution order. Used together
+ * with `scripts`.
+ * @property {{ [name: string]: { enabled?: boolean, attributes?: object } }} [scripts] -
+ * Initialization of each script to create, keyed by script name: its `enabled` state and
+ * `attributes` values. Used together with `order`.
+ * @ignore
  */
 
 const METHOD_INITIALIZE_ATTRIBUTES = '_onInitializeAttributes';
@@ -19,7 +35,8 @@ const METHOD_POST_UPDATE = '_onPostUpdate';
 let executionOrderCounter = 0;
 
 /**
- * Allows scripts to be attached to an Entity and executed.
+ * Manages the {@link ScriptComponent}s of an application. Reach it through `app.systems.script`;
+ * components are created with {@link Entity#addComponent}, never by calling the system directly.
  *
  * @category Script
  */
@@ -37,15 +54,18 @@ class ScriptComponentSystem extends ComponentSystem {
 
         this.ComponentType = ScriptComponent;
 
+        // 'order' is consumed alongside 'scripts' in initializeComponentData, it is not a component property
+        this.extraDataProperties = ['order'];
+
         // list of all entities script components
-        // we are using pc.SortedLoopArray because it is
+        // we are using SortedLoopArray because it is
         // safe to modify while looping through it
         this._components = new SortedLoopArray({
             sortBy: '_executionOrder'
         });
 
         // holds all the enabled script components
-        // (whose entities are also enabled). We are using pc.SortedLoopArray
+        // (whose entities are also enabled). We are using SortedLoopArray
         // because it is safe to modify while looping through it. This array often
         // change during update and postUpdate loops as entities and components get
         // enabled or disabled
@@ -107,7 +127,8 @@ class ScriptComponentSystem extends ComponentSystem {
             const scriptName = scriptInstance.__scriptType.__name;
             order.push(scriptName);
 
-            const attributes = entity.script._attributeDataMap?.get(scriptName) || { };
+            // copy, the map holds the source component's own attribute data
+            const attributes = { ...entity.script._attributeDataMap?.get(scriptName) };
             for (const key in scriptInstance.__attributes) {
                 attributes[key] = scriptInstance.__attributes[key];
             }
@@ -118,10 +139,31 @@ class ScriptComponentSystem extends ComponentSystem {
             };
         }
 
-        for (const key in entity.script._scriptsIndex) {
-            if (key.awaiting) {
-                order.splice(key.ind, 0, key);
+        // scripts still awaiting their script type to be added to the registry have no instance
+        // to read from, so restore them from the data they were declared with. Their entry in
+        // `scripts` is required, otherwise initializeComponentData throws when it looks up the
+        // name coming from `order`.
+        let previousName = null;
+        for (const scriptName of entity.script._declarationOrder) {
+            const indexData = entity.script._scriptsIndex[scriptName];
+
+            // scripts that have an instance are already in `order`
+            if (!indexData?.awaiting) {
+                if (indexData?.instance) previousName = scriptName;
+                continue;
             }
+
+            // place the script directly after the one it was declared after, which is where the
+            // deferred creation in ScriptRegistry#add will put it on the source entity
+            const ind = previousName === null ? 0 : order.indexOf(previousName) + 1;
+            order.splice(ind, 0, scriptName);
+            previousName = scriptName;
+
+            // the same declaration the deferred creation will read on the source entity
+            scripts[scriptName] = {
+                enabled: indexData.enabled,
+                attributes: { ...indexData.attributes }
+            };
         }
 
         const data = {

@@ -7,7 +7,14 @@ import {
     SelectInput
 } from '@playcanvas/pcui/react';
 
-import * as pc from 'playcanvas';
+import {
+    TONEMAP_ACES,
+    TONEMAP_ACES2,
+    TONEMAP_FILMIC,
+    TONEMAP_HEJL,
+    TONEMAP_LINEAR,
+    TONEMAP_NEUTRAL
+} from 'playcanvas';
 
 /**
  * @import { Observer } from '@playcanvas/observer'
@@ -46,12 +53,12 @@ export function Controls({ observer }) {
                         link={{ observer, path: 'data.tonemapping' }}
                         type='number'
                         options={[
-                            { v: pc.TONEMAP_LINEAR, t: 'LINEAR' },
-                            { v: pc.TONEMAP_FILMIC, t: 'FILMIC' },
-                            { v: pc.TONEMAP_HEJL, t: 'HEJL' },
-                            { v: pc.TONEMAP_ACES, t: 'ACES' },
-                            { v: pc.TONEMAP_ACES2, t: 'ACES2' },
-                            { v: pc.TONEMAP_NEUTRAL, t: 'NEUTRAL' }
+                            { v: TONEMAP_LINEAR, t: 'LINEAR' },
+                            { v: TONEMAP_FILMIC, t: 'FILMIC' },
+                            { v: TONEMAP_HEJL, t: 'HEJL' },
+                            { v: TONEMAP_ACES, t: 'ACES' },
+                            { v: TONEMAP_ACES2, t: 'ACES2' },
+                            { v: TONEMAP_NEUTRAL, t: 'NEUTRAL' }
                         ]}
                     />
                 </LabelGroup>
@@ -67,6 +74,13 @@ export function Controls({ observer }) {
                         type='toggle'
                         binding={new BindingTwoWay()}
                         link={{ observer, path: 'data.toon' }}
+                    />
+                </LabelGroup>
+                <LabelGroup text='Flat shading'>
+                    <BooleanInput
+                        type='toggle'
+                        binding={new BindingTwoWay()}
+                        link={{ observer, path: 'data.flatShading' }}
                     />
                 </LabelGroup>
             </Panel>

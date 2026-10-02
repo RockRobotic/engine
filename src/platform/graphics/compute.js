@@ -25,6 +25,11 @@ class ComputeParameter {
 /**
  * A representation of a compute shader with the associated resources, that can be executed on the
  * GPU. Only supported on WebGPU platform.
+ *
+ * Call {@link Compute#destroy} when no longer needed. The graphics device retains compute
+ * instances for device recovery until they are explicitly destroyed.
+ *
+ * @category Graphics
  */
 class Compute {
     /**
@@ -90,7 +95,7 @@ class Compute {
      * Create a compute instance. Note that this is supported on WebGPU only and is a no-op on
      * other platforms.
      *
-     * @param {GraphicsDevice} graphicsDevice -
+     * @param {GraphicsDevice} graphicsDevice
      * The graphics device.
      * @param {Shader} shader - The compute shader.
      * @param {string} [name] - The name of the compute instance, used for debugging only.
@@ -109,7 +114,7 @@ class Compute {
      * Sets a shader parameter on a compute instance.
      *
      * @param {string} name - The name of the parameter to set.
-     * @param {number|number[]|Float32Array|Texture|StorageBuffer|VertexBuffer|IndexBuffer|TextureView} value -
+     * @param {number|number[]|Float32Array|Texture|StorageBuffer|VertexBuffer|IndexBuffer|TextureView} value
      * The value for the specified parameter.
      */
     setParameter(name, value) {

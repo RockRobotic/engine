@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { rollup } from 'rollup';
-import dts from 'rollup-plugin-dts';
+import { dts } from 'rollup-plugin-dts';
 
 import { fixTypes } from './plugins/rollup-types-fixup.mjs';
 
@@ -17,7 +17,8 @@ const TYPES_FOOTER = 'export as namespace pc;\nexport as namespace pcx;';
 const REQUIRED_TYPES = [
     TYPES_ENTRY,
     'build/playcanvas/src/scene/materials/standard-material.d.ts',
-    'build/playcanvas/src/framework/script/script-type.d.ts'
+    'build/playcanvas/src/framework/script/script-type.d.ts',
+    'build/playcanvas/src/framework/asset/asset.d.ts'
 ];
 
 const exists = (file) => {

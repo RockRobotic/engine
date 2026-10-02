@@ -159,7 +159,7 @@ class GltfExporter extends CoreExporter {
             // maps a buffer (vertex or index) to an array of bufferview indices
             bufferViewMap: new Map(),
 
-            compressableTexture: new Set()
+            compressibleTexture: new Set()
         };
 
         const { materials, buffers, entityMeshInstances, textures } = resources;
@@ -184,7 +184,7 @@ class GltfExporter extends CoreExporter {
                             // NOTE: don't store normal maps as jpeg,
                             // because of the way they are sampled, they don't compress well
                             if (semantic !== 'normalMap') {
-                                resources.compressableTexture.add(texture);
+                                resources.compressibleTexture.add(texture);
                             }
 
                             textures.push(texture);
@@ -665,6 +665,9 @@ class GltfExporter extends CoreExporter {
 
                 this.attachTexture(resources, mat, material, 'normalTexture', 'normalMap', json);
                 this.attachTexture(resources, mat, material, 'occlusionTexture', 'aoMap', json);
+                if (material.occlusionTexture && mat.aoIntensity !== 1) {
+                    material.occlusionTexture.strength = mat.aoIntensity;
+                }
                 this.attachTexture(resources, mat, material, 'emissiveTexture', 'emissiveMap', json);
 
                 return material;
@@ -935,7 +938,7 @@ class GltfExporter extends CoreExporter {
             const texture = textures[i];
             const canvas = textureCanvases[i];
 
-            const isRGBA = isCanvasTransparent(canvas) || !resources.compressableTexture.has(texture);
+            const isRGBA = isCanvasTransparent(canvas) || !resources.compressibleTexture.has(texture);
             const mimeType = isRGBA ? 'image/png' : 'image/jpeg';
 
             promises.push(

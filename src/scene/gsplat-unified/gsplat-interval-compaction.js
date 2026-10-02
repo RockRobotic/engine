@@ -131,7 +131,7 @@ class GSplatIntervalCompaction {
 
     /**
      * @param {GraphicsDevice} device - The graphics device (must support compute).
-     * @param {import('./gsplat-hybrid-renderer-scratch.js').GSplatHybridRendererScratch} scratch -
+     * @param {import('./gsplat-hybrid-renderer-scratch.js').GSplatHybridRendererScratch} scratch
      * Manager-owned shared scratch the compacted index list is borrowed from (shared across the
      * forward + shadow GPU-sort passes within a manager).
      */
@@ -161,8 +161,10 @@ class GSplatIntervalCompaction {
         this.sortElementCountBuffer?.destroy();
 
         this._destroyCullPass();
+        this._scatterCompute?.destroy();
         this._scatterCompute?.shader?.destroy();
         this._scatterBindGroupFormat?.destroy();
+        this._writeIndirectArgsCompute?.destroy();
         this._writeIndirectArgsCompute?.shader?.destroy();
         this._writeArgsBindGroupFormat?.destroy();
 
@@ -182,10 +184,12 @@ class GSplatIntervalCompaction {
 
     /** @private */
     _destroyCullPass() {
+        this._cullComputePerspective?.destroy();
         this._cullComputePerspective?.shader?.destroy();
         this._cullBindGroupFormatPerspective?.destroy();
         this._cullComputePerspective = null;
         this._cullBindGroupFormatPerspective = null;
+        this._cullComputeFisheye?.destroy();
         this._cullComputeFisheye?.shader?.destroy();
         this._cullBindGroupFormatFisheye?.destroy();
         this._cullComputeFisheye = null;

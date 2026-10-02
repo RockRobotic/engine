@@ -100,8 +100,8 @@ class StorageBuffer {
      * possible. This has a performance impact, so it should be used only when necessary. Defaults
      * to false.
      * @returns {Promise<ArrayBufferView>} A promise that resolves with the data read from the
-     * storage buffer.
-     * @ignore
+     * storage buffer. Rejects with an `AbortError` if the read is cancelled, for example by device
+     * loss. Other read failures also reject the promise.
      */
     read(offset = 0, size = this.byteSize, data = null, immediate = false) {
         return this.impl.read(this.device, offset, size, data, immediate);
@@ -112,10 +112,10 @@ class StorageBuffer {
      *
      * @param {number} bufferOffset - The offset in bytes to start writing to the storage buffer.
      * @param {ArrayBufferView|ArrayBuffer} data - The data to write to the storage buffer.
-     * @param {number} dataOffset - Offset in data to begin writing from. Given in elements if data
-     * is a TypedArray and bytes otherwise.
-     * @param {number} size - Size of content to write from data to buffer. Given in elements if
-     * data is a TypedArray and bytes otherwise.
+     * @param {number} [dataOffset] - Offset in data to begin writing from. Given in elements if
+     * data is a TypedArray and bytes otherwise. Defaults to 0.
+     * @param {number} [size] - Size of content to write from data to buffer. Given in elements if
+     * data is a TypedArray and bytes otherwise. Defaults to the remaining size of the data.
      */
     write(bufferOffset = 0, data, dataOffset = 0, size) {
         this.impl.write(this.device, bufferOffset, data, dataOffset, size);
