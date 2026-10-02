@@ -171,7 +171,7 @@ class GSplatManager {
     _bakeResult = { rebuilt: false, count: 0, textureSize: 0, sortNeeded: false };
 
     /** @private */
-    _markResult = { rebuilt: false, count: 0, textureSize: 0 };
+    _markResult = { rebuilt: false, count: 0, textureSize: 0, deferred: false };
 
     /** @private */
     _formatResult = { bufferRecreated: false, sortNeeded: false };
@@ -276,6 +276,9 @@ class GSplatManager {
      * @private
      */
     _onDeviceRestored() {
+        // rows already written to the spare order texture were lost with the context
+        this.world.workBuffer.cancelOrderUpload();
+
         if (this.world.hasOctreeInstances) return;
         this.world.invalidate({ workBuffer: true });
         this.sortNeeded = true;
@@ -287,6 +290,7 @@ class GSplatManager {
      * @private
      */
     destroyCpuSorting() {
+        this.world.workBuffer.cancelOrderUpload();
         this.cpuSorter?.destroy();
         this.cpuSorter = null;
     }
@@ -335,13 +339,14 @@ class GSplatManager {
     }
 
     /**
-     * True when the CPU sorter has a completed sort result waiting to be applied by a render. Used
-     * by the director to request a render so the pending result is applied.
+     * True when the CPU sorter has a completed sort result waiting to be applied by a render, or
+     * one that is part-way through being uploaded. Used by the director to request a render so the
+     * result is applied.
      *
      * @type {boolean}
      */
     get hasPendingSort() {
-        return !!this.cpuSorter?.pendingSorted;
+        return !!this.cpuSorter?.pendingSorted || this.world.workBuffer.orderUploadPending;
     }
 
     /**
@@ -542,8 +547,45 @@ class GSplatManager {
             this.renderer.update(result.count, result.textureSize);
         }
 
+        if (result.deferred) {
+            // the order is uploaded over the next frames, from this buffer (see _applySortResults)
+            this.cpuSorter?.retainOrderData();
+            return;
+        }
+
         // update renderer with new order data
         this.renderer.setOrderData();
+    }
+
+    /**
+     * Applies CPU sort results. A sorted order too large to upload in one frame without stalling
+     * is written to a spare texture a slice per frame; while that is in progress it is advanced
+     * here and the next result waits, unless that result is the first sort of a new world state,
+     * which cannot wait: it replaces the upload.
+     *
+     * @private
+     */
+    _applySortResults() {
+        const sorter = /** @type {GSplatUnifiedSorter} */ (this.cpuSorter);
+        const workBuffer = this.world.workBuffer;
+
+        if (workBuffer.orderUploadPending) {
+            const pending = sorter.pendingSorted;
+            const pendingState = pending ? this.world.getState(pending.version) : null;
+            if (pendingState && !pendingState.sortedBefore) {
+                workBuffer.cancelOrderUpload();
+            } else {
+                const orderData = workBuffer.stepOrderUpload();
+                if (orderData) {
+                    // the spare texture is now the order texture
+                    this.renderer.setOrderData();
+                    sorter.releaseOrderData(orderData);
+                }
+                return;
+            }
+        }
+
+        sorter.applyPendingSorted();
     }
 
     /**
@@ -659,7 +701,7 @@ class GSplatManager {
 
         // apply any pending sorted results (CPU path only)
         if (this.cpuSorter) {
-            this.cpuSorter.applyPendingSorted();
+            this._applySortResults();
         }
 
         // check if camera has moved enough to require re-sorting (CPU path; the GPU path re-sorts

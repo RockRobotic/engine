@@ -117,7 +117,6 @@ class WebglUploadStream {
      * @private
      */
     uploadDirect(data, target, offset, size) {
-        Debug.assert(offset === 0, 'Direct texture upload with non-zero offset is not supported. Use PBO mode instead.');
 
         const device = this.uploadStream.device;
         // @ts-ignore - gl is available on WebglGraphicsDevice
@@ -142,12 +141,37 @@ class WebglUploadStream {
             src = new Uint8Array(data.buffer, data.byteOffset, byteSize);
         }
 
-        // Full-buffer upload (texImage2D allocates fresh storage each call).
-        gl.texImage2D(
-            gl.TEXTURE_2D, 0, impl._glInternalFormat,
-            target.width, target.height, 0,
-            impl._glFormat, impl._glPixelType, src
-        );
+        const width = target.width;
+        if (offset === 0 && size === width * target.height) {
+
+            // Full-buffer upload (texImage2D allocates fresh storage each call).
+            gl.texImage2D(
+                gl.TEXTURE_2D, 0, impl._glInternalFormat,
+                width, target.height, 0,
+                impl._glFormat, impl._glPixelType, src
+            );
+
+        } else {
+
+            // Partial upload of whole rows into existing storage. Used to spread a large upload
+            // over several frames; the caller is expected not to be drawing with this texture
+            // until every row has been written.
+            Debug.assert(offset % width === 0, `Upload offset (${offset}) must be a multiple of texture width (${width}) for row alignment`);
+            Debug.assert(size % width === 0, `Upload size (${size}) must be a multiple of texture width (${width}) for row alignment`);
+
+            if (!impl._glCreated) {
+                gl.texImage2D(
+                    gl.TEXTURE_2D, 0, impl._glInternalFormat,
+                    width, target.height, 0,
+                    impl._glFormat, impl._glPixelType, null
+                );
+            }
+
+            gl.texSubImage2D(
+                gl.TEXTURE_2D, 0, 0, offset / width, width, size / width,
+                impl._glFormat, impl._glPixelType, src
+            );
+        }
 
         // Keep engine texture state consistent: storage exists now.
         impl._glCreated = true;
