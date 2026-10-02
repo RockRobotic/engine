@@ -111,7 +111,7 @@ const SKY_CORE_GLSL = /* glsl */ `
 
         vec3 col = (Lin + L0) * 0.04 + vec3(0.0, 0.0003, 0.00075);
         // Clamp the sun disc to a value the bloom can handle. The WebGPU bloom down/upsample
-        // shaders sum 4 neighbour taps in f16 (half) before scaling, and accumulate mip levels
+        // shaders sum 4 neighbor taps in f16 (half) before scaling, and accumulate mip levels
         // additively - so a very bright pixel overflows those intermediate f16 sums (max 65504)
         // to Inf/NaN and corrupts the whole screen. 6000 keeps every intermediate well in range.
         return min(col * procSkyLuminance, vec3(6000.0));
@@ -177,7 +177,7 @@ const SKY_CORE_WGSL = /* wgsl */ `
 
         let col = (Lin + L0) * 0.04 + vec3f(0.0, 0.0003, 0.00075);
         // Clamp the sun disc to a value the bloom can handle. The WebGPU bloom down/upsample
-        // shaders sum 4 neighbour taps in f16 (half) before scaling, and accumulate mip levels
+        // shaders sum 4 neighbor taps in f16 (half) before scaling, and accumulate mip levels
         // additively - so a very bright pixel overflows those intermediate f16 sums (max 65504)
         // to Inf/NaN and corrupts the whole screen. 6000 keeps every intermediate well in range.
         return min(col * uniform.procSkyLuminance, vec3f(6000.0));
@@ -193,7 +193,7 @@ const SKY_CORE_WGSL = /* wgsl */ `
 // to the visible sky (not the IBL bake), so it lives outside SKY_CORE.
 const NIGHT_CORE_GLSL = /* glsl */ `
     uniform float procSkyNightBlend;       // 0 = day, 1 = night
-    uniform vec3 procSkyNightColor;        // deep night sky base colour
+    uniform vec3 procSkyNightColor;        // deep night sky base color
     uniform float procSkyNightBrightness;
     uniform float procSkyStarBrightness;
     uniform float procSkyStarDensity;      // 0..1 fraction of cells holding a star
@@ -478,6 +478,7 @@ const sunRotQuat = new Quat();
  *
  * An optional directional light is kept in sync with the sun, so direct lighting and shadows match
  * the visible sky and its image-based lighting.
+ * @category Rendering
  */
 class ProceduralSky extends Script {
     static scriptName = 'proceduralSky';
@@ -500,6 +501,21 @@ class ProceduralSky extends Script {
      * @type {number}
      */
     elevation = 25;
+
+    /**
+     * Rotation of the whole sky around the Y axis, in degrees. It is added to the sun azimuth, so the
+     * sky, the sun and the moon all turn together, along with the sun light and the shadows it casts.
+     * Use it to orient the sky relative to the scene without disturbing the azimuth and elevation - a
+     * day / night cycle driving those keeps its mapping of time to sun position.
+     *
+     * Note the procedural star field is anchored to the world axes rather than turning with the sky,
+     * which is not observable as the stars are noise to begin with.
+     *
+     * @attribute
+     * @range [0, 360]
+     * @type {number}
+     */
+    rotation = 0;
 
     /**
      * Atmosphere haziness. Higher values give a milkier sky and a larger sun glow.
@@ -592,7 +608,7 @@ class ProceduralSky extends Script {
     _baseSunIntensity = null;
 
     /**
-     * Colour of the moonlight the directional light fades to once the sun is below the horizon.
+     * Color of the moonlight the directional light fades to once the sun is below the horizon.
      *
      * @attribute
      * @type {Color}
@@ -619,7 +635,7 @@ class ProceduralSky extends Script {
     moonDirection = new Vec3(-1.53, 0.85, 0.35);
 
     /**
-     * Deep night sky base colour.
+     * Deep night sky base color.
      *
      * @attribute
      * @type {Color}
@@ -750,7 +766,14 @@ class ProceduralSky extends Script {
         // force a lighting bake on the first update
         this._bakedParams = '';
 
+        device.on('devicerestored', this._onDeviceRestored, this);
         this.on('destroy', this._onDestroy, this);
+    }
+
+    /** @private */
+    _onDeviceRestored() {
+        // Rebuild GPU-generated lighting on the next update, after the sky uniforms are set.
+        this._bakedParams = '';
     }
 
     /** @private */
@@ -789,9 +812,27 @@ class ProceduralSky extends Script {
      */
     _computeSunDir(out) {
         const el = this.elevation * Math.PI / 180;
-        const az = this.azimuth * Math.PI / 180;
+        const az = (this.azimuth + this.rotation) * Math.PI / 180;
         const cosEl = Math.cos(el);
         return out.set(cosEl * Math.sin(az), Math.sin(el), cosEl * Math.cos(az)).normalize();
+    }
+
+    /**
+     * Computes the world-space direction towards the moon, turned by the sky rotation so that it keeps
+     * its place relative to the sun's path.
+     *
+     * @param {Vec3} out - The vector to receive the result.
+     * @returns {Vec3} The world-space moon direction.
+     * @private
+     */
+    _computeMoonDir(out) {
+        const a = this.rotation * Math.PI / 180;
+        const sin = Math.sin(a);
+        const cos = Math.cos(a);
+        const { x, y, z } = this.moonDirection;
+
+        // rotate around Y in the same direction an increasing azimuth turns, see _computeSunDir
+        return out.set(x * cos + z * sin, y, z * cos - x * sin).normalize();
     }
 
     /**
@@ -879,11 +920,13 @@ class ProceduralSky extends Script {
             this._baseSunIntensity = light.intensity;
         }
 
-        // crossfade the key light from the sun (day) to the dim cold moon from above (night)
-        const nightFactor = Math.max(0, Math.min(1, (3 - this.elevation) / 6));
+        // crossfade the key light from the sun (day) to the dim cold moon from above (night).
+        // The crossfade only starts once the sun dips below the horizon, so while the sun is
+        // visible the light direction matches it exactly (specular reflections line up)
+        const nightFactor = Math.max(0, Math.min(1, -this.elevation / 6));
 
         // light source direction: towards the sun by day, towards the moon by night
-        tmpMoon.copy(this.moonDirection).normalize();
+        this._computeMoonDir(tmpMoon);
         const src = tmpSrc.lerp(this._sunDir, tmpMoon, nightFactor).normalize();
 
         // A directional light emits along its entity's -Y (down) axis (see forward-renderer:
@@ -902,7 +945,7 @@ class ProceduralSky extends Script {
         sunRotQuat.setFromMat4(sunRotMat);
         this.sunLight.setRotation(sunRotQuat);
 
-        // colour: warm -> white sun by day, cold moon by night
+        // color: warm -> white sun by day, cold moon by night
         const y = this._sunDir.y;
         const t = Math.max(0, Math.min(1, y / 0.4));
         this._sunColor.lerp(this._warmColor, this._zenithColor, t);
@@ -932,7 +975,7 @@ class ProceduralSky extends Script {
         scope.resolve('procSkyLuminance').setValue(this.luminance);
 
         // night sky: blend factor from the sun elevation (day above +2 deg, night below -8 deg),
-        // plus the night layer parameters. The moon disk reuses the moon light direction/colour.
+        // plus the night layer parameters. The moon disk reuses the moon light direction/color.
         scope.resolve('procSkyNightBlend').setValue(Math.max(0, Math.min(1, (2 - this.elevation) / 10)));
         scope.resolve('procSkyNightColor').setValue([this.nightColor.r, this.nightColor.g, this.nightColor.b]);
         scope.resolve('procSkyNightBrightness').setValue(this.nightBrightness);
@@ -943,7 +986,7 @@ class ProceduralSky extends Script {
         scope.resolve('procSkyMoonColor').setValue([this.moonColor.r, this.moonColor.g, this.moonColor.b]);
         scope.resolve('procSkyMoonSize').setValue(this.moonSize * Math.PI / 180);
         scope.resolve('procSkyMoonGlow').setValue(this.moonGlow);
-        tmpMoon.copy(this.moonDirection).normalize();
+        this._computeMoonDir(tmpMoon);
         scope.resolve('procSkyMoonDir').setValue([-tmpMoon.x, tmpMoon.y, tmpMoon.z]);
 
         this._updateSunLight();
@@ -962,6 +1005,7 @@ class ProceduralSky extends Script {
     /** @private */
     _onDestroy() {
         const device = this.app.graphicsDevice;
+        device.off('devicerestored', this._onDeviceRestored, this);
 
         // restore the original sky shader chunks
         if (this._origSkyboxGLSL !== null) {

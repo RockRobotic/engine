@@ -38,6 +38,19 @@ const DIST_EPSILON = 1e-4;
 /**
  * The base class for all gizmos.
  *
+ * A gizmo is an interactive widget drawn over the scene in its own {@link Layer};
+ * {@link createLayer} makes such a layer and adds it to the scene and the camera. Construct a gizmo
+ * for a {@link CameraComponent}, then {@link attach} the {@link GraphNode}s it should act on, which
+ * are then listed in {@link nodes}; {@link detach} releases them. A gizmo updates and renders
+ * itself from the application's update and prerender hooks, so it needs no per-frame call and is
+ * torn down with {@link destroy}. {@link size} scales the widget, which otherwise keeps a constant
+ * apparent size as the camera moves; {@link coordSpace} selects `'world'` or `'local'` axes;
+ * {@link enabled} hides it without detaching; and {@link mouseButtons} chooses which buttons
+ * interact. Pointer interaction is reported through the `pointer:down`, `pointer:move` and
+ * `pointer:up` events, node changes through `nodes:attach` and `nodes:detach`, and the
+ * resulting transforms through `position:update`, `rotation:update` and `scale:update`.
+ * {@link TransformGizmo} builds the translate, rotate and scale gizmos on this base.
+ *
  * @category Gizmo
  */
 class Gizmo extends EventHandler {
@@ -46,7 +59,7 @@ class Gizmo extends EventHandler {
      *
      * @event
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.on('pointer:down', (x, y, meshInstance) => {
      *     console.log(`Pointer was down on ${meshInstance.node.name} at ${x}, ${y}`);
      * });
@@ -58,7 +71,7 @@ class Gizmo extends EventHandler {
      *
      * @event
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.on('pointer:move', (x, y, meshInstance) => {
      *     console.log(`Pointer was moving on ${meshInstance.node.name} at ${x}, ${y}`);
      * });
@@ -70,7 +83,7 @@ class Gizmo extends EventHandler {
      *
      * @event
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.on('pointer:up', (x, y, meshInstance) => {
      *     console.log(`Pointer was up on ${meshInstance.node.name} at ${x}, ${y}`);
      * })
@@ -82,7 +95,7 @@ class Gizmo extends EventHandler {
      *
      * @event
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.on('position:update', (position) => {
      *     console.log(`The gizmo's position was updated to ${position}`);
      * })
@@ -94,7 +107,7 @@ class Gizmo extends EventHandler {
      *
      * @event
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.on('rotation:update', (rotation) => {
      *     console.log(`The gizmo's rotation was updated to ${rotation}`);
      * });
@@ -106,7 +119,7 @@ class Gizmo extends EventHandler {
      *
      * @event
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.on('scale:update', (scale) => {
      *     console.log(`The gizmo's scale was updated to ${scale}`);
      * });
@@ -118,7 +131,7 @@ class Gizmo extends EventHandler {
      *
      * @event
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.on('nodes:attach', () => {
      *     console.log('Graph nodes attached');
      * });
@@ -130,7 +143,7 @@ class Gizmo extends EventHandler {
      *
      * @event
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.on('nodes:detach', () => {
      *     console.log('Graph nodes detached');
      * });
@@ -142,7 +155,7 @@ class Gizmo extends EventHandler {
      *
      * @event
      * @example
-     * const gizmo = new pc.TransformGizmo(camera, layer);
+     * const gizmo = new TransformGizmo(camera, layer);
      * gizmo.on('render:update', () => {
      *     console.log('Gizmo render has been updated');
      * });
@@ -280,7 +293,7 @@ class Gizmo extends EventHandler {
      * and will be removed from the camera and scene when the last gizmo is destroyed.
      * @param {string} [name] - The name of the gizmo. Defaults to 'gizmo'.
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      */
     constructor(camera, layer, name = 'gizmo') {
         super();
@@ -652,7 +665,7 @@ class Gizmo extends EventHandler {
      *
      * @param {GraphNode[] | GraphNode} [nodes] - The graph nodes. Defaults to [].
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.attach([boxA, boxB]);
      */
     attach(nodes = []) {
@@ -678,7 +691,7 @@ class Gizmo extends EventHandler {
      * Detaches all graph nodes from the gizmo.
      *
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.attach([boxA, boxB]);
      * gizmo.detach();
      */
@@ -694,7 +707,7 @@ class Gizmo extends EventHandler {
      * Pre-render method. This is called before the gizmo is rendered.
      *
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.attach([boxA, boxB]);
      * gizmo.prerender();
      */
@@ -705,7 +718,7 @@ class Gizmo extends EventHandler {
      * Updates the gizmo position, rotation, and scale.
      *
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.attach([boxA, boxB]);
      * gizmo.update();
      */
@@ -728,7 +741,7 @@ class Gizmo extends EventHandler {
      * Detaches all graph nodes and destroys the gizmo instance.
      *
      * @example
-     * const gizmo = new pc.Gizmo(camera, layer);
+     * const gizmo = new Gizmo(camera, layer);
      * gizmo.attach([boxA, boxB]);
      * gizmo.destroy();
      */

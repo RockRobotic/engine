@@ -196,6 +196,7 @@ export { StandardMaterialOptions } from './scene/materials/standard-material-opt
 // SCENE / PROCEDURAL
 export { calculateNormals, calculateTangents } from './scene/geometry/geometry-utils.js';
 export { CapsuleGeometry } from './scene/geometry/capsule-geometry.js';
+export { CircleGeometry } from './scene/geometry/circle-geometry.js';
 export { ConeGeometry } from './scene/geometry/cone-geometry.js';
 export { CylinderGeometry } from './scene/geometry/cylinder-geometry.js';
 export { DomeGeometry } from './scene/geometry/dome-geometry.js';
@@ -236,7 +237,9 @@ export * from './framework/constants.js';
 export { script } from './framework/script.js';
 export { AppBase, app } from './framework/app-base.js';
 export { AppOptions } from './framework/app-options.js';
+export { AppStats } from './framework/app-stats.js';
 export { Application } from './framework/application.js';
+export { AmmoPhysicsWorld } from './framework/physics/ammo/ammo-physics-world.js';
 export { AnimationComponent } from './framework/components/animation/component.js';
 export { AnimationComponentSystem } from './framework/components/animation/system.js';
 export { AnimComponent } from './framework/components/anim/component.js';
@@ -258,7 +261,7 @@ export * from './framework/components/element/constants.js';
 export { ElementComponent } from './framework/components/element/component.js';
 export { ElementComponentSystem } from './framework/components/element/system.js';
 export { ElementDragHelper } from './framework/components/element/element-drag-helper.js';
-export { Entity } from './framework/entity.js';
+export * from './framework/entity.js';
 export { GSplatComponent } from './framework/components/gsplat/component.js';
 export { GSplatComponentSystem } from './framework/components/gsplat/system.js';
 export { ImageElement } from './framework/components/element/image-element.js';
@@ -276,8 +279,10 @@ export { LightComponentSystem } from './framework/components/light/system.js';
 export { Lightmapper } from './framework/lightmapper/lightmapper.js';
 export { ModelComponent } from './framework/components/model/component.js';
 export { ModelComponentSystem } from './framework/components/model/system.js';
+export { NullPhysicsWorld } from './framework/physics/null/null-physics-world.js';
 export { ParticleSystemComponent } from './framework/components/particle-system/component.js';
 export { ParticleSystemComponentSystem } from './framework/components/particle-system/system.js';
+export { PhysicsWorld } from './framework/physics/physics-world.js';
 export { PostEffectQueue } from './framework/components/camera/post-effect-queue.js';
 export { RenderComponent } from './framework/components/render/component.js';
 export { RenderComponentSystem } from './framework/components/render/system.js';
@@ -330,7 +335,7 @@ export { AnimStateGraph } from './framework/anim/state-graph/anim-state-graph.js
 
 // FRAMEWORK / ASSETS
 export * from './framework/asset/constants.js';
-export { Asset } from './framework/asset/asset.js';
+export * from './framework/asset/asset.js';
 export { AssetListLoader } from './framework/asset/asset-list-loader.js';
 export { AssetReference } from './framework/asset/asset-reference.js';
 export { AssetRegistry } from './framework/asset/asset-registry.js';
@@ -348,6 +353,7 @@ export { BundleRegistry } from './framework/bundle/bundle-registry.js';
 // FRAMEWORK / GRAPHICS
 export { Picker } from './framework/graphics/picker.js';
 export { RenderPassPicker } from './framework/graphics/render-pass-picker.js';
+export { SceneDepthReader } from './framework/graphics/scene-depth-reader.js';
 
 // FRAMEWORK / HANDLERS
 export { basisInitialize } from './framework/handlers/basis.js';

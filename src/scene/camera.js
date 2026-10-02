@@ -1,12 +1,13 @@
 import { Color } from '../core/math/color.js';
 import { Debug } from '../core/debug.js';
 import { Mat4 } from '../core/math/mat4.js';
+import { Vec2 } from '../core/math/vec2.js';
 import { Vec3 } from '../core/math/vec3.js';
 import { Vec4 } from '../core/math/vec4.js';
 import { math } from '../core/math/math.js';
 import { Frustum } from '../core/shape/frustum.js';
 import {
-    ASPECT_AUTO, PROJECTION_PERSPECTIVE, PROJECTION_ORTHOGRAPHIC,
+    VIEW_CENTER, ASPECT_AUTO, PROJECTION_PERSPECTIVE, PROJECTION_ORTHOGRAPHIC,
     LAYERID_WORLD, LAYERID_DEPTH, LAYERID_SKYBOX, LAYERID_UI, LAYERID_IMMEDIATE
 } from './constants.js';
 import { FramePassColorGrab } from './graphics/frame-pass-color-grab.js';
@@ -17,7 +18,9 @@ import { CameraShaderParams } from './camera-shader-params.js';
  * @import { FramePass } from '../platform/graphics/frame-pass.js'
  * @import { GraphicsDevice } from '../platform/graphics/graphics-device.js'
  * @import { RenderTarget } from '../platform/graphics/render-target.js'
+ * @import { Texture } from '../platform/graphics/texture.js'
  * @import { FogParams } from './fog-params.js'
+ * @import { Layer } from './layer.js'
  * @import { RenderView } from './render-view.js'
  * @import { ShaderPassInfo } from './shader-pass.js'
  */
@@ -29,7 +32,12 @@ const _point = new Vec3();
 const _invViewProjMat = new Mat4();
 const _xrViewProjMat = new Mat4();
 const _xrViewFrustum = new Frustum();
+const _frustumViewInvMat = new Mat4();
+const _frustumViewMat = new Mat4();
+const _frustumViewProjMat = new Mat4();
 const _frustumPoints = [new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3(), new Vec3()];
+
+let id = 0;
 
 /**
  * A camera.
@@ -118,15 +126,43 @@ class Camera {
     framePasses = [];
 
     /**
-     * Frame passes that execute before this camera's main scene rendering. Entries are picked up
-     * by the RenderPassForward that renders this camera's layers.
+     * Frame passes that execute before this camera's main scene rendering, after the camera's
+     * directional shadow passes. Entries are picked up by the RenderPassForward that renders
+     * this camera's layers.
      *
      * @type {FramePass[]}
      */
     beforePasses = [];
 
+    /**
+     * The scene depth texture most recently published for this camera, or null. The uniform it is
+     * published to is global - the last camera to render owns it - so anything wanting the depth of
+     * one camera in particular reads it from here instead. See {@link SceneDepthReader}.
+     *
+     * @type {Texture|null}
+     * @ignore
+     */
+    sceneDepthMap = null;
+
+    /**
+     * The render version {@link Camera#sceneDepthMap} was published in, so a consumer can tell a
+     * texture rendered this frame from one left over from an earlier one.
+     *
+     * @type {number}
+     * @ignore
+     */
+    sceneDepthMapVersion = -1;
+
     /** @type {number} */
     jitter = 0;
+
+    /**
+     * A unique id of the camera, used where the camera needs to be referenced without retaining
+     * it, for example as a key in {@link MeshInstance} draw command maps.
+     *
+     * @type {number}
+     */
+    id = id++;
 
     /**
      * The graphics device used by this camera. Required so the camera can compute its aspect
@@ -149,6 +185,7 @@ class Camera {
         this._calculateProjection = null;
         this._calculateTransform = null;
         this._clearColor = new Color(0.75, 0.75, 0.75, 1);
+        this._clearColors = null;
         this._clearColorBuffer = true;
         this._clearDepth = 1;
         this._clearDepthBuffer = true;
@@ -166,6 +203,7 @@ class Camera {
         this._node = null;
         this._orthoHeight = 10;
         this._projection = PROJECTION_PERSPECTIVE;
+        this._projectionOffset = new Vec2();
         this._rect = new Vec4(0, 0, 1, 1);
         this._renderTarget = null;
         this._scissorRect = new Vec4(0, 0, 1, 1);
@@ -191,6 +229,12 @@ class Camera {
 
         this.frustum = new Frustum();
 
+        // Reusable set of layers to cull for this camera in the current frame. Populated through
+        // requestMeshInstanceCull and drained by executeMeshInstanceCull on the renderer's culler;
+        // kept on the camera so the per-camera cull state needs no per-frame allocation.
+        /** @type {Set<Layer>} */
+        this._cullLayers = new Set();
+
         // Set by XrManager when an XR session takes over this camera: a reference to the manager's
         // live per-view array (matrices, viewports, updated each frame), or null when not in XR.
         // `xrActive` is derived from it. This replaces the previous back-pointer to the XrManager,
@@ -215,6 +259,21 @@ class Camera {
         this.renderPassDepthGrab = null;
 
         this.framePasses.length = 0;
+        this.beforePasses.length = 0;
+        this.sceneDepthMap = null;
+    }
+
+    /**
+     * Records the scene depth texture a producer has published for this camera, alongside the render
+     * version it was published in.
+     *
+     * @param {Texture} texture - The texture the depth was rendered to.
+     * @param {number} renderVersion - The render version it was rendered in.
+     * @ignore
+     */
+    publishSceneDepthMap(texture, renderVersion) {
+        this.sceneDepthMap = texture;
+        this.sceneDepthMapVersion = renderVersion;
     }
 
     /**
@@ -300,6 +359,40 @@ class Camera {
 
     get clearColor() {
         return this._clearColor;
+    }
+
+    /**
+     * Sets the clear color of a color attachment of the render target. Attachment 0 is
+     * {@link Camera#clearColor}, and the other attachments of a multiple render target clear to the
+     * same color unless given their own. Passing null removes the color of an attachment, so it
+     * clears to the attachment 0 color again.
+     *
+     * @param {number} index - The index of the color attachment.
+     * @param {Color|null} color - The clear color, or null to clear to the attachment 0 color.
+     */
+    setClearColor(index, color) {
+        Debug.assert(Number.isInteger(index) && index >= 0, `Invalid color attachment index ${index}.`);
+
+        if (index === 0) {
+            Debug.assert(color, 'The clear color of the color attachment 0 cannot be removed.');
+            this._clearColor.copy(color);
+        } else if (color) {
+            // stored sparsely, most cameras render to a single color attachment
+            this._clearColors ??= [];
+            (this._clearColors[index] ??= new Color()).copy(color);
+        } else if (this._clearColors) {
+            this._clearColors[index] = undefined;
+        }
+    }
+
+    /**
+     * Gets the clear color of a color attachment of the render target.
+     *
+     * @param {number} index - The index of the color attachment.
+     * @returns {Color} The clear color of the attachment.
+     */
+    getClearColor(index) {
+        return this._clearColors?.[index] ?? this._clearColor;
     }
 
     set clearColorBuffer(newValue) {
@@ -464,6 +557,15 @@ class Camera {
         return this._projMat;
     }
 
+    set projectionOffset(newValue) {
+        this._projectionOffset.copy(newValue);
+        this._projMatDirty = true;
+    }
+
+    get projectionOffset() {
+        return this._projectionOffset;
+    }
+
     set rect(newValue) {
         this._rect.copy(newValue);
         this._projMatDirty = true;
@@ -555,6 +657,43 @@ class Camera {
     }
 
     /**
+     * Registers a layer to be culled for this camera in the current frame. Used by the renderer's
+     * request/execute mesh-instance culling.
+     *
+     * @param {Layer} layer - The layer to cull for this camera.
+     * @returns {boolean} True if this is the first layer registered for this camera this frame,
+     * letting the caller track the camera exactly once.
+     * @ignore
+     */
+    addCullLayer(layer) {
+        const first = this._cullLayers.size === 0;
+        this._cullLayers.add(layer);
+        return first;
+    }
+
+    /**
+     * Gets the set of layers registered to be culled for this camera in the current frame. For
+     * read-only iteration; use {@link Camera#addCullLayer} and {@link Camera#clearCullLayers} to
+     * mutate it.
+     *
+     * @type {Set<Layer>}
+     * @ignore
+     */
+    get cullLayers() {
+        return this._cullLayers;
+    }
+
+    /**
+     * Clears the set of layers registered to be culled for this camera, called once the camera's
+     * culling has been performed.
+     *
+     * @ignore
+     */
+    clearCullLayers() {
+        this._cullLayers.clear();
+    }
+
+    /**
      * Calculates the aspect ratio that should be used for the camera, based on the size of the
      * given render target (or the backbuffer if no render target is given), and the camera's
      * `rect`. The `rect` is included so that a camera rendering into a sub-region of a render
@@ -608,6 +747,8 @@ class Camera {
         this.calculateProjection = other.calculateProjection;
         this.calculateTransform = other.calculateTransform;
         this.clearColor = other.clearColor;
+        this._clearColors = null;
+        other._clearColors?.forEach((color, index) => this.setClearColor(index, color));
         this.clearColorBuffer = other.clearColorBuffer;
         this.clearDepth = other.clearDepth;
         this.clearDepthBuffer = other.clearDepthBuffer;
@@ -619,6 +760,7 @@ class Camera {
         this.layers = other.layers;
         this.orthoHeight = other.orthoHeight;
         this.projection = other.projection;
+        this.projectionOffset = other.projectionOffset;
         this.rect = other.rect;
         this.renderTarget = other.renderTarget;
         this.scissorRect = other.scissorRect;
@@ -665,11 +807,11 @@ class Camera {
 
     /**
      * Refreshes the derived per-view matrices of all {@link Camera#xrViews}, using this camera's
-     * parent world transform. The renderer (and the gsplat passes, which run earlier in the frame)
+     * parent world transform. The renderer, the gsplat passes and {@link Camera#updateXrFrustum}
      * call this before reading the per-view matrices.
      *
      * Note: this recomputes on every call. Within a frame the parent transform is stable, so the
-     * 2-3 calls/frame could be collapsed to a single recompute by guarding on
+     * several calls per frame could be collapsed to a single recompute by guarding on
      * `device.renderVersion` (as {@link Camera#_storeShaderMatrices} does) - left as a future
      * optimization, as it needs checking against cameras that render multiple times per frame
      * (e.g. multiple render targets).
@@ -702,6 +844,10 @@ class Camera {
             return false;
         }
 
+        // culling runs before the renderer refreshes the derived per-view matrices, so refresh them
+        // here, for the current pose of the views and transform of the camera's parent
+        this.updateViewTransforms();
+
         // first view establishes the base frustum
         _xrViewProjMat.mul2(views[0].projMat, views[0].viewOffMat);
         this.frustum.setFromMat4(_xrViewProjMat);
@@ -713,6 +859,39 @@ class Camera {
             this.frustum.add(_xrViewFrustum);
         }
         return true;
+    }
+
+    /**
+     * Updates {@link Camera#frustum} for the camera's current transform and projection, for
+     * visibility culling. Uses the combined (VIEW_CENTER) view; XR cameras delegate to
+     * {@link Camera#updateXrFrustum}. Honors the {@link Camera#calculateProjection} and
+     * {@link Camera#calculateTransform} overrides.
+     *
+     * @ignore
+     */
+    updateFrustum() {
+
+        // XR: combined frustum from all views (avoids culling objects visible in only one eye)
+        if (this.updateXrFrustum()) {
+            return;
+        }
+
+        const projMat = this.projectionMatrix;
+        if (this.calculateProjection) {
+            this.calculateProjection(projMat, VIEW_CENTER);
+        }
+
+        if (this.calculateTransform) {
+            this.calculateTransform(_frustumViewInvMat, VIEW_CENTER);
+        } else {
+            const pos = this._node.getPosition();
+            const rot = this._node.getRotation();
+            _frustumViewInvMat.setTRS(pos, rot, Vec3.ONE);
+        }
+        _frustumViewMat.copy(_frustumViewInvMat).invert();
+
+        _frustumViewProjMat.mul2(projMat, _frustumViewMat);
+        this.frustum.setFromMat4(_frustumViewProjMat);
     }
 
     /**
@@ -775,9 +954,11 @@ class Camera {
             // calculate half width and height at the near clip plane
             Mat4._getPerspectiveHalfSize(_halfSize, this.fov, this.aspectRatio, this.nearClip, this.horizontalFov);
 
-            // scale by normalized screen coordinates
-            _halfSize.x *= _deviceCoord.x;
-            _halfSize.y *= _deviceCoord.y;
+            // scale by normalized screen coordinates, taking the projection offset into account
+            // (the offset is ignored in XR, where projection matrices are supplied by the XR system)
+            const offset = this.xrActive ? Vec2.ZERO : this._projectionOffset;
+            _halfSize.x *= _deviceCoord.x + offset.x;
+            _halfSize.y *= _deviceCoord.y + offset.y;
 
             // transform to world space
             const invView = this._node.getWorldTransform();
@@ -809,14 +990,27 @@ class Camera {
         // no other input changes)
         const aspect = this.aspectRatio;
         if (this._projMatDirty) {
+            const offset = this._projectionOffset;
             if (this._projection === PROJECTION_PERSPECTIVE) {
                 this._projMat.setPerspective(this.fov, aspect, this.nearClip, this.farClip, this.horizontalFov);
+
+                // off-center projection - the offset is directly the frustum off-center terms
+                // (right+left)/(right-left) and (top+bottom)/(top-bottom), in half-frustum units
+                this._projMat.data[8] = offset.x;
+                this._projMat.data[9] = offset.y;
                 this._projMatSkybox.copy(this._projMat);
             } else {
                 const y = this._orthoHeight;
                 const x = y * aspect;
                 this._projMat.setOrtho(-x, x, -y, y, this.nearClip, this.farClip);
+
+                // off-center projection - translate the ortho window by the offset in half-window
+                // units, matching the perspective sign convention
+                this._projMat.data[12] = -offset.x;
+                this._projMat.data[13] = -offset.y;
                 this._projMatSkybox.setPerspective(this.fov, aspect, this.nearClip, this.farClip);
+                this._projMatSkybox.data[8] = offset.x;
+                this._projMatSkybox.data[9] = offset.y;
             }
 
             this._projMatDirty = false;
@@ -875,6 +1069,7 @@ class Camera {
     getFrustumCorners(near = this.nearClip, far = this.farClip) {
 
         const fov = this.fov * math.DEG_TO_RAD;
+        const offset = this.xrActive ? Vec2.ZERO : this._projectionOffset;
         let x, y;
 
         if (this.projection === PROJECTION_PERSPECTIVE) {
@@ -890,18 +1085,22 @@ class Camera {
             x = y * this.aspectRatio;
         }
 
+        // center of the projection window, offset for off-center projections
+        let cx = offset.x * x;
+        let cy = offset.y * y;
+
         const points = _frustumPoints;
-        points[0].x = x;
-        points[0].y = -y;
+        points[0].x = cx + x;
+        points[0].y = cy - y;
         points[0].z = -near;
-        points[1].x = x;
-        points[1].y = y;
+        points[1].x = cx + x;
+        points[1].y = cy + y;
         points[1].z = -near;
-        points[2].x = -x;
-        points[2].y = y;
+        points[2].x = cx - x;
+        points[2].y = cy + y;
         points[2].z = -near;
-        points[3].x = -x;
-        points[3].y = -y;
+        points[3].x = cx - x;
+        points[3].y = cy - y;
         points[3].z = -near;
 
         if (this._projection === PROJECTION_PERSPECTIVE) {
@@ -912,18 +1111,20 @@ class Camera {
                 y = far * Math.tan(fov / 2.0);
                 x = y * this.aspectRatio;
             }
+            cx = offset.x * x;
+            cy = offset.y * y;
         }
-        points[4].x = x;
-        points[4].y = -y;
+        points[4].x = cx + x;
+        points[4].y = cy - y;
         points[4].z = -far;
-        points[5].x = x;
-        points[5].y = y;
+        points[5].x = cx + x;
+        points[5].y = cy + y;
         points[5].z = -far;
-        points[6].x = -x;
-        points[6].y = y;
+        points[6].x = cx - x;
+        points[6].y = cy + y;
         points[6].z = -far;
-        points[7].x = -x;
-        points[7].y = -y;
+        points[7].x = cx - x;
+        points[7].y = cy - y;
         points[7].z = -far;
 
         return points;

@@ -7,11 +7,14 @@ import { ShaderMaterial } from '../materials/shader-material.js';
 import { GSplatFormat } from '../gsplat/gsplat-format.js';
 import { GSplatVaryings } from './gsplat-varyings.js';
 import {
+    DITHER_BLUENOISE,
     GSPLATDATA_COMPACT,
     GSPLAT_RENDERER_AUTO, GSPLAT_RENDERER_RASTER_CPU_SORT,
     GSPLAT_RENDERER_COMPUTE, GSPLAT_RENDERER_RASTER_GPU_SORT,
     GSPLAT_DEBUG_NONE, GSPLAT_DEBUG_LOD, GSPLAT_DEBUG_SH_UPDATE, GSPLAT_DEBUG_HEATMAP,
-    GSPLAT_DEBUG_AABBS, GSPLAT_DEBUG_NODE_AABBS
+    GSPLAT_DEBUG_AABBS, GSPLAT_DEBUG_NODE_AABBS,
+    GSPLAT_LODMODE_DISTANCE,
+    GSPLAT_BUDGET_TARGET, GSPLAT_BUDGET_LIMIT
 } from '../constants.js';
 
 import glslCompactRead from '../shader-lib/glsl/chunks/gsplat/vert/formats/containerCompactRead.js';
@@ -22,6 +25,7 @@ import wgslCompactRead from '../shader-lib/wgsl/chunks/gsplat/vert/formats/conta
 import wgslCompactWrite from '../shader-lib/wgsl/chunks/gsplat/frag/formats/containerCompactWrite.js';
 import wgslPackedRead from '../shader-lib/wgsl/chunks/gsplat/vert/formats/containerPackedRead.js';
 import wgslPackedWrite from '../shader-lib/wgsl/chunks/gsplat/frag/formats/containerPackedWrite.js';
+import { SPLAT_BUDGET_DEFAULT } from './constants.js';
 
 /**
  * @import { GraphicsDevice } from '../../platform/graphics/graphics-device.js'
@@ -106,8 +110,8 @@ class GSplatParams {
         } else {
             // Large work buffer format (32 bytes/splat):
             // - dataColor (RGBA16F/RGBA16U): RGBA color with alpha
-            // - dataTransformA (RGBA32U): center.xyz (3×32-bit floats as uint) + rotation.xy (2×16-bit halfs)
-            // - dataTransformB (RG32U): rotation.z + scale.xyz (4×16-bit halfs, scale.w derived via sqrt)
+            // - dataTransformA (RGBA32U): center.xyz (3×32-bit floats as uint) + rotation.xy (2×16-bit halves)
+            // - dataTransformB (RG32U): rotation.z + scale.xyz (4×16-bit halves, scale.w derived via sqrt)
             const colorFormat = this._device.getRenderableHdrFormat([PIXELFORMAT_RGBA16F]) || PIXELFORMAT_RGBA16U;
             format = new GSplatFormat(this._device, [
                 { name: 'dataColor', format: colorFormat },
@@ -133,6 +137,35 @@ class GSplatParams {
      * while linear sorting is better at minimizing artifacts when the camera translates (moves).
      */
     radialSorting = false;
+
+    /**
+     * Enables stochastic alpha rendering on the WebGPU GPU-sort renderer. Splats are drawn
+     * without sorting, using dithered coverage, opaque blending and depth writes. Ignored by
+     * the CPU-sort renderer. Picking continues to use sorted rendering. Defaults to false.
+     * Applications can customize the sampling through the material's opacityDitherPS chunk.
+     *
+     * @type {boolean}
+     */
+    stochastic = false;
+
+    /**
+     * The noise pattern the coverage of a {@link GSplatParams#stochastic} splat is dithered
+     * against, ignored when `stochastic` is false. Can be:
+     *
+     * - {@link DITHER_BAYER2}: Coverage is dithered using a Bayer 2 matrix.
+     * - {@link DITHER_BAYER4}: Coverage is dithered using a Bayer 4 matrix.
+     * - {@link DITHER_BAYER8}: Coverage is dithered using a Bayer 8 matrix.
+     * - {@link DITHER_BAYER16}: Coverage is dithered using a Bayer 16 matrix.
+     * - {@link DITHER_BLUENOISE}: Coverage is dithered using a blue noise.
+     * - {@link DITHER_IGNNOISE}: Coverage is dithered using an interleaved gradient noise.
+     *
+     * Defaults to {@link DITHER_BLUENOISE}, which looks best under temporal anti-aliasing.
+     * {@link DITHER_NONE} is not a coverage pattern, so it is not accepted here - turn
+     * `stochastic` off instead.
+     *
+     * @type {string}
+     */
+    dither = DITHER_BLUENOISE;
 
     /**
      * @type {number}
@@ -369,19 +402,20 @@ class GSplatParams {
 
     /**
      * Angle threshold in degrees to trigger LOD updates based on camera rotation. Set to 0 to
-     * disable rotation-based updates. Defaults to 0.
+     * disable rotation-based updates. Rotation only affects LOD through {@link lodBehindPenalty},
+     * so rotation-based updates also stop when the penalty is 1. Defaults to 90.
      */
-    lodUpdateAngle = 0;
+    lodUpdateAngle = 90;
 
     /** @private */
-    _lodBehindPenalty = 1;
+    _lodBehindPenalty = 1.5;
 
     /**
      * Multiplier applied to effective distance for nodes behind the camera when determining LOD.
-     * Value 1 means no penalty; higher values drop LOD faster for nodes behind the camera.
-     *
-     * Note: when using a penalty > 1, it often makes sense to set a positive
-     * {@link lodUpdateAngle} so LOD is re-evaluated on camera rotation, not just translation.
+     * Value 1 means no penalty; higher values drop LOD faster for nodes behind the camera. Streamed
+     * LOD files also load in order of the same penalized distance, so higher values load the view
+     * in front of the camera earlier. Works together with {@link lodUpdateAngle}, which
+     * re-evaluates LOD as the camera rotates. Defaults to 1.5.
      *
      * @type {number}
      */
@@ -399,6 +433,38 @@ class GSplatParams {
      */
     get lodBehindPenalty() {
         return this._lodBehindPenalty;
+    }
+
+    /** @private */
+    _lodDistanceShrink = 0.75;
+
+    /**
+     * Sets how the camera distance to each part of a streamed GSplat is judged when choosing its
+     * level of detail. At 0, a part counts as near as soon as any of it is near, so unusually
+     * large or sparse areas that reach towards the camera - sky, distant background, long thin
+     * regions - can get more detail than their surroundings and show up as patches of higher
+     * detail. Higher values judge those oversized parts closer to their middle instead, which
+     * removes the patches and lowers memory use; parts of typical size are unaffected. Use 1
+     * when memory matters more than detail close up, for example on mobile - it gives the lowest
+     * memory use. Clamped to [0, 1]. Defaults to 0.75.
+     *
+     * @type {number}
+     * @ignore
+     */
+    set lodDistanceShrink(value) {
+        value = Math.min(Math.max(value, 0), 1);
+        if (this._lodDistanceShrink !== value) {
+            this._lodDistanceShrink = value;
+            this.dirty = true;
+        }
+    }
+
+    /**
+     * @type {number}
+     * @ignore
+     */
+    get lodDistanceShrink() {
+        return this._lodDistanceShrink;
     }
 
     /**
@@ -467,12 +533,14 @@ class GSplatParams {
     }
 
     /** @private */
-    _splatBudget = 0;
+    _splatBudget = SPLAT_BUDGET_DEFAULT;
 
     /**
-     * Target number of splats across all GSplats in the scene. When set > 0,
-     * the system adjusts LOD levels globally to stay within this budget.
-     * Set to 0 to disable budget enforcement and use LOD distances only (default).
+     * Number of splats across all GSplats in the scene. How it is used depends on
+     * {@link GSplatParams#splatBudgetMode}: as a target that LOD detail is raised to fill, or as a
+     * limit that only lowers the detail the LOD distances of each GSplat ask for. Set to 0 for no
+     * budget at all - in target mode everything then renders at its finest level, in limit mode
+     * the LOD distances alone decide. Defaults to 1000000.
      *
      * @type {number}
      */
@@ -484,12 +552,68 @@ class GSplatParams {
     }
 
     /**
-     * Gets the target number of splats across all GSplats in the scene.
+     * Gets the number of splats across all GSplats in the scene.
      *
      * @type {number}
      */
     get splatBudget() {
         return this._splatBudget;
+    }
+
+    /** @private */
+    _splatBudgetMode = GSPLAT_BUDGET_TARGET;
+
+    /**
+     * Sets how {@link GSplatParams#splatBudget} is used for streamed GSplats. Can be:
+     *
+     * - {@link GSPLAT_BUDGET_TARGET}: detail is raised until the budget is used up, wherever the
+     * camera is. The LOD distances of each GSplat only shape how detail falls off with distance
+     * and how it divides between GSplats.
+     * - {@link GSPLAT_BUDGET_LIMIT}: the LOD distances of each GSplat decide the detail, and the
+     * budget only lowers it when they would exceed it. A distant GSplat uses only the few splats
+     * its distance calls for.
+     *
+     * Defaults to {@link GSPLAT_BUDGET_TARGET}.
+     *
+     * @type {string}
+     */
+    set splatBudgetMode(value) {
+        if (value !== GSPLAT_BUDGET_TARGET && value !== GSPLAT_BUDGET_LIMIT) {
+            Debug.warnOnce(`GSplatParams#splatBudgetMode: ignoring invalid value '${value}', expected GSPLAT_BUDGET_TARGET or GSPLAT_BUDGET_LIMIT.`);
+            return;
+        }
+        if (this._splatBudgetMode !== value) {
+            this._splatBudgetMode = value;
+            this.dirty = true;
+        }
+    }
+
+    /**
+     * Gets how the splat budget is used.
+     *
+     * @type {string}
+     */
+    get splatBudgetMode() {
+        return this._splatBudgetMode;
+    }
+
+    /**
+     * @type {string}
+     * @deprecated LOD levels are always chosen by distance.
+     * @ignore
+     */
+    set lodMode(value) {
+        Debug.removed('GSplatParams#lodMode is removed. LOD levels are always chosen by distance, see GSplatComponent#lodBaseDistance and GSplatParams#splatBudgetMode.');
+    }
+
+    /**
+     * @type {string}
+     * @deprecated LOD levels are always chosen by distance.
+     * @ignore
+     */
+    get lodMode() {
+        Debug.removed('GSplatParams#lodMode is removed. LOD levels are always chosen by distance, see GSplatComponent#lodBaseDistance and GSplatParams#splatBudgetMode.');
+        return GSPLAT_LODMODE_DISTANCE;
     }
 
     /**
@@ -535,6 +659,14 @@ class GSplatParams {
      */
     useFog = true;
 
+    /**
+     * Whether to apply the camera's tonemapping and the scene exposure to Gaussian splats. When
+     * false, splats render with their stored colors, unaffected by {@link Scene#exposure} and the
+     * camera's {@link CameraComponent#toneMapping}. Fog, when enabled, still applies. Defaults to
+     * true.
+     */
+    useTonemap = true;
+
     /** @deprecated Use {@link debug} with {@link GSPLAT_DEBUG_SH_UPDATE} instead. */
     set colorizeColorUpdate(value) {
         Debug.deprecated('GSplatParams#colorizeColorUpdate is deprecated. Use GSplatParams#debug = GSPLAT_DEBUG_SH_UPDATE instead.');
@@ -554,6 +686,8 @@ class GSplatParams {
      * When the camera translates enough to change the viewing angle to an octree node or
      * splat by this amount, its SH colors are re-evaluated. Distant nodes naturally update
      * less frequently since they require more camera movement to reach the angle threshold.
+     * An orthographic camera views all splats along its forward direction, so their colors are
+     * re-evaluated together once the camera rotates by this amount, and moving it has no effect.
      * Set to 0 to update every frame where camera moves. Defaults to 10.
      */
     colorUpdateAngle = 10;
@@ -830,6 +964,24 @@ class GSplatParams {
     cooldownTicks = 100;
 
     /**
+     * Whether the gaussian splats contribute to the scene depth, which the volumetric fog and the depth
+     * of field need in order to be bounded by the splats instead of drawing through them.
+     *
+     * This costs an extra full screen render target, and so defaults to false. Enable it for a scene
+     * where the splats need to take part in those effects. Requires the camera to render using
+     * {@link CameraFrame} - see {@link CameraFrame.isSplatSceneDepthSupported}.
+     *
+     * On some devices enabling this stores the scene depth at a lower precision, which the other
+     * effects using it share. The depth stays accurate over camera clip distances of roughly 0.000015
+     * to 16384 there; past the far end of that a distant depth loses accuracy, and the pixels nothing
+     * covers stop reading as far away as they are. Keep the far clip inside that range on those
+     * devices, or leave the effects which read the depth off.
+     *
+     * @type {boolean}
+     */
+    sceneDepthWrite = false;
+
+    /**
      * Work buffer data format. Controls the precision and bandwidth of the intermediate work buffer
      * used during GSplat rendering. Can be set to {@link GSPLATDATA_COMPACT} (20 bytes/splat)
      * or {@link GSPLATDATA_LARGE} (32 bytes/splat). Defaults to {@link GSPLATDATA_COMPACT}.
@@ -894,7 +1046,7 @@ class GSplatParams {
      * // Add a custom stream to store per-splat component IDs
      * app.scene.gsplat.format.addExtraStreams([{
      *     name: 'splatId',
-     *     format: pc.PIXELFORMAT_R32U
+     *     format: PIXELFORMAT_R32U
      * }]);
      */
     get format() {
@@ -926,7 +1078,7 @@ class GSplatParams {
      * // and read per fragment in gsplatModifyPS using getFlag()
      * app.scene.gsplat.varyings.add([{
      *     name: 'flag',
-     *     type: pc.TYPE_UINT32,
+     *     type: TYPE_UINT32,
      *     components: 1
      * }]);
      */
@@ -950,6 +1102,7 @@ class GSplatParams {
         this.lodBehindPenalty = render.gsplatLodBehindPenalty ?? this.lodBehindPenalty;
         this.lodUnderfillLimit = render.gsplatLodUnderfillLimit ?? this.lodUnderfillLimit;
         this.splatBudget = render.gsplatSplatBudget ?? this.splatBudget;
+        this.splatBudgetMode = render.gsplatSplatBudgetMode ?? this.splatBudgetMode;
 
         this.alphaClip = render.gsplatAlphaClip ?? this.alphaClip;
         this.alphaClipForward = render.gsplatAlphaClipForward ?? this.alphaClipForward;
@@ -960,6 +1113,7 @@ class GSplatParams {
 
         this.antiAlias = render.gsplatAntiAlias ?? this.antiAlias;
         this.useFog = render.gsplatUseFog ?? this.useFog;
+        this.useTonemap = render.gsplatUseTonemap ?? this.useTonemap;
         this.colorUpdateAngle = render.gsplatColorUpdateAngle ?? this.colorUpdateAngle;
         this.cooldownTicks = render.gsplatCooldownTicks ?? this.cooldownTicks;
         this.dataFormat = render.gsplatDataFormat ?? this.dataFormat;
@@ -967,12 +1121,11 @@ class GSplatParams {
     }
 
     /**
-     * Called at the end of the frame to clear dirty flags.
+     * Called at the end of the frame to clear the parameter dirty flag.
      *
      * @ignore
      */
     frameEnd() {
-        this._material.dirty = false;
         this.dirty = false;
     }
 

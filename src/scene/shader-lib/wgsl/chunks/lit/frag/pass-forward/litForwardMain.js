@@ -1,6 +1,8 @@
 // main shader entry point for the lit material for forward rendering
 export default /* wgsl */`
 
+#include "sceneTexturesPS"
+
 @fragment
 fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
@@ -20,7 +22,11 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
     #endif
 
     #ifdef LIT_NEEDS_NORMAL
-        dVertexNormalW = normalize(vNormalW);
+        #ifdef FLAT_SHADING
+            dVertexNormalW = getFlatNormal(vPositionW);
+        #else
+            dVertexNormalW = normalize(vNormalW);
+        #endif
 
         #ifdef LIT_TANGENTS
             #if defined(LIT_HEIGHTS) || defined(LIT_USE_NORMALS) || defined(LIT_USE_CLEARCOAT_NORMALS) || defined(LIT_GGX_SPECULAR)
@@ -33,10 +39,11 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
 
         #ifdef LIT_TBN
             getTBN(dTangentW, dBinormalW, dVertexNormalW);
+        #endif
 
-            #ifdef LIT_TWO_SIDED_LIGHTING
-                handleTwoSidedLighting();
-            #endif
+        // after the TBN matrix, which is built from the unflipped normal
+        #ifdef LIT_TWO_SIDED_LIGHTING
+            handleTwoSidedLighting();
         #endif
     #endif
 
@@ -46,6 +53,12 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
     #include "debugProcessFrontendPS"
 
     var output: FragmentOutput = evaluateBackend();
+
+    // guarded by the same define the write function tests internally, as vLinearDepth is only
+    // generated when the depth is written
+    #ifdef SCENE_TEXTURE_DEPTH
+        writeSceneTextureDepth(&output, vLinearDepth, 1.0);
+    #endif
 
     #include "litUserMainEndPS"
 

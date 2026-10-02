@@ -105,16 +105,15 @@ class Lcc2Parser {
     /** @type {AppBase} */
     app;
 
-    /** @type {number} */
-    maxRetries;
-
     /**
      * @param {AppBase} app - The app instance.
-     * @param {number} maxRetries - Maximum amount of retries.
      */
-    constructor(app, maxRetries) {
+    constructor(app) {
         this.app = app;
-        this.maxRetries = maxRetries;
+    }
+
+    canParse(context) {
+        return context.ext === 'lcc2';
     }
 
     /**
@@ -128,8 +127,8 @@ class Lcc2Parser {
         }
 
         const options = {
-            retry: this.maxRetries > 0,
-            maxRetries: this.maxRetries,
+            retry: this.handler.maxRetries > 0,
+            maxRetries: this.handler.maxRetries,
             responseType: Http.ResponseType.JSON,
             // Send cookies so CloudFront signed-cookie-protected URLs work.
             // Safe for non-credentialed origins: browser only attaches cookies

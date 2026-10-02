@@ -1,11 +1,36 @@
 import { sortPriority } from '../../../core/sort.js';
 import { Color } from '../../../core/math/color.js';
+import { Vec2 } from '../../../core/math/vec2.js';
 import { Vec4 } from '../../../core/math/vec4.js';
 import { ComponentSystem } from '../system.js';
 import { CameraComponent } from './component.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { CalculateMatrixCallback } from './component.js'
+ * @import { Entity } from '../../entity.js'
+ */
+
+/**
+ * Options of the `camera` component accepted by {@link CameraComponentSystem} that differ from the
+ * properties of {@link CameraComponent}. Each replaces the same-named property of the options that
+ * {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} CameraComponentOptionsOverrides
+ * @property {CalculateMatrixCallback} [calculateProjection] - Same as
+ * {@link CameraComponent#calculateProjection}.
+ * @property {CalculateMatrixCallback} [calculateTransform] - Same as
+ * {@link CameraComponent#calculateTransform}.
+ * @property {Color | number[]} [clearColor] - Same as {@link CameraComponent#clearColor}, also
+ * accepting an `[r, g, b, a]` array.
+ * @property {Vec2 | number[]} [projectionOffset] - Same as
+ * {@link CameraComponent#projectionOffset}, also accepting an `[x, y]` array.
+ * @property {Vec4 | number[]} [rect] - Same as {@link CameraComponent#rect}, also accepting an `[x,
+ * y, w, h]` array.
+ * @property {Vec4 | number[]} [scissorRect] - Same as {@link CameraComponent#scissorRect}, also
+ * accepting an `[x, y, w, h]` array.
+ * @ignore
  */
 
 const _properties = [
@@ -32,6 +57,7 @@ const _properties = [
     'nearClip',
     'orthoHeight',
     'projection',
+    'projectionOffset',
     'priority',
     'rect',
     'scissorRect',
@@ -94,6 +120,13 @@ class CameraComponentSystem extends ComponentSystem {
                             component[property] = value;
                         }
                         break;
+                    case 'projectionOffset':
+                        if (Array.isArray(value)) {
+                            component[property] = new Vec2(value[0], value[1]);
+                        } else {
+                            component[property] = value;
+                        }
+                        break;
                     default:
                         component[property] = value;
                         break;
@@ -116,7 +149,12 @@ class CameraComponentSystem extends ComponentSystem {
             data[property] = c[property];
         }
 
-        return this.addComponent(clone, data);
+        const component = this.addComponent(clone, data);
+
+        // the clear colors of the other color attachments are not component data
+        c._camera._clearColors?.forEach((color, index) => component.setClearColor(index, color));
+
+        return component;
     }
 
     onBeforeRemove(entity, component) {

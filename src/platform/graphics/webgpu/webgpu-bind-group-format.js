@@ -41,6 +41,14 @@ class WebgpuBindGroupFormat {
      */
     constructor(bindGroupFormat) {
 
+        this.bindGroupFormat = bindGroupFormat;
+        bindGroupFormat.device._bindGroupFormats.add(this);
+        this.restoreContext();
+    }
+
+    restoreContext() {
+        const bindGroupFormat = this.bindGroupFormat;
+
         /** @type {WebgpuGraphicsDevice} */
         const device = bindGroupFormat.device;
 
@@ -67,11 +75,12 @@ class WebgpuBindGroupFormat {
     }
 
     destroy() {
+        this.bindGroupFormat.device._bindGroupFormats.delete(this);
         this.bindGroupLayout = null;
     }
 
     loseContext() {
-        // this.bindGroupLayout = null;
+        this.bindGroupLayout = null;
     }
 
     /**
@@ -123,10 +132,14 @@ class WebgpuBindGroupFormat {
             // texture
             const sampleType = textureFormat.sampleType;
             const viewDimension = textureFormat.textureDimension;
-            const multisampled = false;
+            const multisampled = !!textureFormat.multisampled;
 
             const gpuSampleType = sampleTypes[sampleType];
             Debug.assert(gpuSampleType);
+            if (multisampled) {
+                Debug.assert(viewDimension === '2d', `Multisampled texture binding requires 2d viewDimension, got '${viewDimension}'`);
+                Debug.assert(gpuSampleType !== 'float', 'Multisampled texture binding cannot use sampleType \'float\'');
+            }
 
             key += `#${textureFormat.slot}T:${visibility}-${gpuSampleType}-${viewDimension}-${multisampled}`;
 

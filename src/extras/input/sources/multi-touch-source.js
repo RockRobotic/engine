@@ -1,13 +1,16 @@
 import { Vec2 } from '../../../core/math/vec2.js';
 import { InputSource } from '../input.js';
-import { movementState } from '../utils.js';
+import { isTouchPointer, movementState } from '../utils.js';
 
 const tmpVa = new Vec2();
 
 /**
- * Multi-touch input source class
+ * Multi-touch input source class. Attached to an element, it accumulates `touch` deltas for the
+ * movement of the touch points, `count` deltas for changes in the number of touches, and `pinch`
+ * deltas for the change in distance between two touches, which is what an orbiting camera needs
+ * on a touch screen.
  *
- * @category Input Source
+ * @category Input
  * @alpha
  *
  * @typedef {object} MultiTouchSourceDeltas
@@ -56,7 +59,7 @@ class MultiTouchSource extends InputSource {
         const { pointerId, pointerType } = event;
         this._movementState.down(event);
 
-        if (pointerType !== 'touch') {
+        if (!isTouchPointer(pointerType)) {
             return;
         }
         this._element?.setPointerCapture(pointerId);
@@ -81,7 +84,7 @@ class MultiTouchSource extends InputSource {
         const { pointerType, target, pointerId } = event;
         const [movementX, movementY] = this._movementState.move(event);
 
-        if (pointerType !== 'touch') {
+        if (!isTouchPointer(pointerType)) {
             return;
         }
         if (target !== this._element) {
@@ -117,7 +120,7 @@ class MultiTouchSource extends InputSource {
         const { pointerType, pointerId } = event;
         this._movementState.up(event);
 
-        if (pointerType !== 'touch') {
+        if (!isTouchPointer(pointerType)) {
             return;
         }
         this._element?.releasePointerCapture(pointerId);

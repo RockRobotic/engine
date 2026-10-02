@@ -96,7 +96,9 @@ class WebgpuTexture {
         this.format = gpuTextureFormats[texture.format];
         Debug.assert(this.format !== '', `WebGPU does not support texture format ${texture.format} [${pixelFormatInfo.get(texture.format)?.name}] for texture ${texture.name}`, texture);
 
-        this.create(texture.device);
+        if (!texture.device.contextLost) {
+            this.create(texture.device);
+        }
     }
 
     create(device) {
@@ -126,7 +128,9 @@ class WebgpuTexture {
             },
             format: this.format,
             mipLevelCount: numLevels,
-            sampleCount: 1,
+            // multisampled textures are constrained at the Texture level: 2d, single mip, no
+            // storage; RENDER_ATTACHMENT is required and TEXTURE_BINDING / COPY_* are allowed
+            sampleCount: texture.samples,
             dimension: texture.volume ? '3d' : '2d',
 
             // TODO: use only required usage flags
@@ -329,6 +333,10 @@ class WebgpuTexture {
     }
 
     loseContext() {
+        this.gpuTexture = null;
+        this.view = null;
+        this.viewCache.clear();
+        this.samplers.length = 0;
     }
 
     /**
@@ -336,6 +344,9 @@ class WebgpuTexture {
      * @param {Texture} texture - The texture.
      */
     uploadImmediate(device, texture) {
+
+        // Downloads can finish while a replacement device is still being requested.
+        if (device.contextLost || device._destroyed) return;
 
         if (texture._needsUpload || texture._needsMipmapsUpload) {
             Debug.assert(!device.insideRenderPass,
@@ -516,7 +527,7 @@ class WebgpuTexture {
         device.submit();
 
         // create 2d context so webgpu can upload the texture
-        dummyUse(image instanceof HTMLCanvasElement && image.getContext('2d'));
+        dummyUse(typeof HTMLCanvasElement !== 'undefined' && image instanceof HTMLCanvasElement && image.getContext('2d'));
 
         Debug.trace(TRACEID_RENDER_QUEUE, `IMAGE-TO-TEX: mip:${mipLevel} index:${index} ${this.texture.name}`);
         device.wgpu.queue.copyExternalImageToTexture(src, dst, copySize);
@@ -678,6 +689,43 @@ class WebgpuTexture {
             // return user's data or create correctly-typed array view
             return data ?? new ArrayType(targetBuffer);
         });
+    }
+
+    /**
+     * Copies a region of a source texture into this texture. See {@link Texture#copy}.
+     *
+     * @param {Texture} source - The source texture.
+     * @param {object} options - The copy options.
+     * @returns {boolean} True if the copy was successful.
+     */
+    copy(source, options) {
+
+        /** @type {WebgpuGraphicsDevice} */
+        const device = this.texture.device;
+
+        const sourceMipLevel = options.sourceMipLevel ?? 0;
+        const destMipLevel = options.destMipLevel ?? 0;
+        const face = options.face ?? 0;
+
+        const sx = options.sourceX ?? 0;
+        const sy = options.sourceY ?? 0;
+        const dx = options.destX ?? 0;
+        const dy = options.destY ?? 0;
+        const w = options.width ?? Math.max(1, source.width >> sourceMipLevel);
+        const h = options.height ?? Math.max(1, source.height >> sourceMipLevel);
+
+        // ensure any deferred texture uploads are flushed before recording the copy, as this
+        // copy is recorded outside of a render / compute pass (which would otherwise flush them)
+        device._uploadDirtyTextures();
+
+        const commandEncoder = device.getCommandEncoder();
+        commandEncoder.copyTextureToTexture(
+            { texture: source.impl.gpuTexture, mipLevel: sourceMipLevel, origin: [sx, sy, face] },
+            { texture: this.gpuTexture, mipLevel: destMipLevel, origin: [dx, dy, face] },
+            { width: w, height: h, depthOrArrayLayers: 1 }
+        );
+
+        return true;
     }
 }
 

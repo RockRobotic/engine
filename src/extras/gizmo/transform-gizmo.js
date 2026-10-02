@@ -47,6 +47,15 @@ const AXES = /** @type {('x' | 'y' | 'z')[]} */ (['x', 'y', 'z']);
 /**
  * The base class for all transform gizmos.
  *
+ * It adds to {@link Gizmo} everything the {@link TranslateGizmo}, {@link RotateGizmo} and
+ * {@link ScaleGizmo} share: colored X, Y and Z handles with plane and center shapes, any of which
+ * {@link enableShape} can turn off; a drag interaction that fires `transform:start`,
+ * `transform:move` with the position or angle delta so far, and `transform:end`; {@link snap}
+ * with {@link snapIncrement} to quantize the change; {@link dragMode} to show, hide or keep only
+ * the selected shape while dragging; and a color {@link theme} adjusted through {@link setTheme},
+ * `xAxisColor`, `yAxisColor`, `zAxisColor` and `colorAlpha`. The
+ * subclasses decide what a drag does to the attached nodes.
+ *
  * @category Gizmo
  */
 class TransformGizmo extends Gizmo {
@@ -55,7 +64,7 @@ class TransformGizmo extends Gizmo {
      *
      * @event
      * @example
-     * const gizmo = new pc.TransformGizmo(camera, layer);
+     * const gizmo = new TransformGizmo(camera, layer);
      * gizmo.on('transform:start', () => {
      *     console.log('Transformation started');
      * });
@@ -67,7 +76,7 @@ class TransformGizmo extends Gizmo {
      *
      * @event
      * @example
-     * const gizmo = new pc.TransformGizmo(camera, layer);
+     * const gizmo = new TransformGizmo(camera, layer);
      * gizmo.on('transform:move', (pointDelta, angleDelta) => {
      *     console.log(`Transformation moved by ${pointDelta} (angle: ${angleDelta})`);
      * });
@@ -79,7 +88,7 @@ class TransformGizmo extends Gizmo {
      *
      * @event
      * @example
-     * const gizmo = new pc.TransformGizmo(camera, layer);
+     * const gizmo = new TransformGizmo(camera, layer);
      * gizmo.on('transform:end', () => {
      *     console.log('Transformation ended');
      * });
@@ -215,7 +224,7 @@ class TransformGizmo extends Gizmo {
      * @param {Layer} layer - The render layer.
      * @param {string} [name] - The name of the gizmo.
      * @example
-     * const gizmo = new pc.TransformGizmo(camera, layer);
+     * const gizmo = new TransformGizmo(camera, layer);
      */
     constructor(camera, layer, name = 'gizmo:transform') {
         super(camera, layer, name);

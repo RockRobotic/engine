@@ -4,10 +4,29 @@ import { AnimComponent } from './component.js';
 
 /**
  * @import { AppBase } from '../../app-base.js'
+ * @import { Component } from '../component.js'
+ * @import { Entity } from '../../entity.js'
  */
 
 /**
- * The AnimComponentSystem manages creating and deleting AnimComponents.
+ * Options of the `anim` component accepted by {@link AnimComponentSystem} that differ from the
+ * properties of {@link AnimComponent}. Each replaces the same-named property of the options that
+ * {@link Entity#addComponent} derives from the component class; see
+ * {@link ComponentOptionsOverrides}.
+ *
+ * @typedef {object} AnimComponentOptionsOverrides
+ * @property {{ name: string, weight?: number, mask?: object, blendType?: string }[]} [layers] -
+ * Layers to add with {@link AnimComponent#addLayer}, each with a `name` and optional `weight`,
+ * `mask` and `blendType`.
+ * @property {{ [layer: string]: { mask: object } }} [masks] - Bone masks to assign to the added
+ * layers, keyed by layer name.
+ * @ignore
+ */
+
+/**
+ * Manages the {@link AnimComponent}s of an application and advances their state graphs each
+ * frame. Reach it through `app.systems.anim`; components are created with
+ * {@link Entity#addComponent}, never by calling the system directly.
  *
  * @category Animation
  */
@@ -25,8 +44,13 @@ class AnimComponentSystem extends ComponentSystem {
 
         this.ComponentType = AnimComponent;
 
+        // 'layers' is read-only (managed via addLayer) and 'masks' is not a component property; both
+        // are consumed directly in initializeComponentData
+        this.extraDataProperties = ['layers', 'masks'];
+
         this.on('beforeremove', this.onBeforeRemove, this);
         this.app.systems.on('animationUpdate', this.onAnimationUpdate, this);
+        this.app.systems.on('meshInstancesChange', this.onMeshInstancesChange, this);
     }
 
     initializeComponentData(component, data, properties) {
@@ -96,6 +120,30 @@ class AnimComponentSystem extends ComponentSystem {
         }
     }
 
+    /**
+     * Rebinds every component animating a hierarchy which contains the entity whose mesh instances
+     * changed. Anim targets which reference mesh instances - morph target weights and animated
+     * material textures - are resolved once and then cached, so they have to be re-resolved when the
+     * mesh instances they point at are created or destroyed. Disabled components are included, as
+     * they keep their bindings and are not rebound when re-enabled.
+     *
+     * @param {Component} component - The component whose mesh instances changed.
+     * @private
+     */
+    onMeshInstancesChange(component) {
+        const components = this.store;
+
+        for (const id in components) {
+            if (components.hasOwnProperty(id)) {
+                const animComponent = components[id].entity.anim;
+
+                if (animComponent.animatesEntity(component.entity)) {
+                    animComponent.rebind();
+                }
+            }
+        }
+    }
+
     cloneComponent(entity, clone) {
         let masks;
         // If the component animates from the components entity, any layer mask hierarchy should be
@@ -142,6 +190,7 @@ class AnimComponentSystem extends ComponentSystem {
         super.destroy();
 
         this.app.systems.off('animationUpdate', this.onAnimationUpdate, this);
+        this.app.systems.off('meshInstancesChange', this.onMeshInstancesChange, this);
     }
 }
 

@@ -7,7 +7,14 @@ import {
     SliderInput
 } from '@playcanvas/pcui/react';
 
-import * as pc from 'playcanvas';
+import {
+    TONEMAP_ACES,
+    TONEMAP_ACES2,
+    TONEMAP_FILMIC,
+    TONEMAP_HEJL,
+    TONEMAP_LINEAR,
+    TONEMAP_NEUTRAL
+} from 'playcanvas';
 
 /**
  * @import { Observer } from '@playcanvas/observer'
@@ -36,12 +43,12 @@ export function Controls({ observer }) {
                     link={{ observer, path: 'data.sceneTonemapping' }}
                     type='number'
                     options={[
-                        { v: pc.TONEMAP_LINEAR, t: 'LINEAR' },
-                        { v: pc.TONEMAP_FILMIC, t: 'FILMIC' },
-                        { v: pc.TONEMAP_HEJL, t: 'HEJL' },
-                        { v: pc.TONEMAP_ACES, t: 'ACES' },
-                        { v: pc.TONEMAP_ACES2, t: 'ACES2' },
-                        { v: pc.TONEMAP_NEUTRAL, t: 'NEUTRAL' }
+                        { v: TONEMAP_LINEAR, t: 'LINEAR' },
+                        { v: TONEMAP_FILMIC, t: 'FILMIC' },
+                        { v: TONEMAP_HEJL, t: 'HEJL' },
+                        { v: TONEMAP_ACES, t: 'ACES' },
+                        { v: TONEMAP_ACES2, t: 'ACES2' },
+                        { v: TONEMAP_NEUTRAL, t: 'NEUTRAL' }
                     ]}
                 />
             </LabelGroup>
@@ -54,6 +61,46 @@ export function Controls({ observer }) {
                     precision={2}
                 />
             </LabelGroup>
+            <LabelGroup text='Vertical Correction'>
+                <SliderInput
+                    binding={new BindingTwoWay()}
+                    link={{ observer, path: 'data.verticalCorrection' }}
+                    min={0}
+                    max={1}
+                    precision={2}
+                />
+            </LabelGroup>
+            <Panel headerText='Bloom'>
+                <LabelGroup text='Intensity'>
+                    <SliderInput
+                        binding={new BindingTwoWay()}
+                        link={{ observer, path: 'data.bloom.intensity' }}
+                        min={0}
+                        max={0.1}
+                        precision={3}
+                        step={0.001}
+                    />
+                </LabelGroup>
+                <LabelGroup text='Blur Level'>
+                    <SliderInput
+                        binding={new BindingTwoWay()}
+                        link={{ observer, path: 'data.bloom.blurLevel' }}
+                        min={1}
+                        max={16}
+                        precision={0}
+                    />
+                </LabelGroup>
+                <LabelGroup text='Threshold'>
+                    <SliderInput
+                        binding={new BindingTwoWay()}
+                        link={{ observer, path: 'data.bloom.threshold' }}
+                        min={0}
+                        max={100}
+                        precision={2}
+                        step={0.01}
+                    />
+                </LabelGroup>
+            </Panel>
         </>
     );
 }

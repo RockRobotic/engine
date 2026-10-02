@@ -14,7 +14,7 @@ import {
 
 const tmpVa = new Vec2();
 
-const EPISILON = 1e-3;
+const EPSILON = 1e-3;
 
 const vertexGLSL = /* glsl */ `
     attribute vec3 vertex_position;
@@ -232,6 +232,24 @@ const fragmentWGSL = /* wgsl */ `
     }
 `;
 
+/**
+ * Renders an anti-aliased reference grid on the XZ plane, using the "pristine grid" shader
+ * technique. Lines along the X and Z axes are tinted with {@link Grid#colorX} and
+ * {@link Grid#colorZ}, and {@link Grid#resolution} selects how many grid levels are shown.
+ *
+ * The script creates a render component on its entity, with the grid plane sized by the
+ * entity's local scale.
+ *
+ * @example
+ * gridEntity.setLocalScale(8, 1, 8);
+ * gridEntity.addComponent('script');
+ * gridEntity.script.create(Grid, {
+ *     properties: {
+ *         resolution: Grid.RESOLUTION_HIGH
+ *     }
+ * });
+ * @category Rendering
+ */
 class Grid extends Script {
     static scriptName = 'grid';
 
@@ -334,7 +352,7 @@ class Grid extends Script {
                 return;
             }
             const halfExtents = this._calcHalfExtents(tmpVa);
-            if (this._halfExtents.distance(halfExtents) > EPISILON) {
+            if (this._halfExtents.distance(halfExtents) > EPSILON) {
                 this._set('uHalfExtents', halfExtents);
             }
         });

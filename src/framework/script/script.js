@@ -43,6 +43,12 @@ import { SCRIPT_INITIALIZE, SCRIPT_POST_INITIALIZE } from './constants.js';
  *
  * For more information on how to create scripts, see the [Scripting Overview](https://developer.playcanvas.com/user-manual/scripting/).
  *
+ * The `playcanvas` package also ships a library of ready-to-use `Script` subclasses under the
+ * `playcanvas/scripts/esm/` subpath — camera and character controllers, post-processing, water,
+ * sky, grid, shadow catcher, planar reflections, XR and Gaussian-splat effects. Import them
+ * directly, for example
+ * `import { CameraControls } from 'playcanvas/scripts/esm/camera-controls.mjs'`.
+ *
  * @category Script
  */
 export class Script extends EventHandler {
@@ -208,8 +214,8 @@ export class Script extends EventHandler {
      * Create a new Script instance.
      *
      * @param {object} args - The input arguments object.
-     * @param {AppBase} args.app - The {@link AppBase} that is running the script.
-     * @param {Entity} args.entity - The {@link Entity} that the script is attached to.
+     * @param {AppBase} args.app - The AppBase that is running the script.
+     * @param {Entity} args.entity - The Entity that the script is attached to.
      */
     constructor(args) {
         super();
@@ -271,8 +277,8 @@ export class Script extends EventHandler {
     /**
      * @typedef {object} ScriptInitializationArgs
      * @property {boolean} [enabled] - True if the script instance is in running state.
-     * @property {AppBase} app - The {@link AppBase} that is running the script.
-     * @property {Entity} entity - The {@link Entity} that the script is attached to.
+     * @property {AppBase} app - The AppBase that is running the script.
+     * @property {Entity} entity - The Entity that the script is attached to.
      */
 
     /**

@@ -45,33 +45,36 @@ STATES_TO_SPRITE_FRAME_NAMES[VisualState.INACTIVE] = 'inactiveSpriteFrame';
  * The ButtonComponent enables an {@link Entity} to behave like a button, with different visual
  * states for hover and press interactions. It is designed to be used together with an
  * {@link ElementComponent} on the same entity, which provides the button's visual appearance and
- * input hit area.
+ * input hit area. Set {@link imageEntity}, usually to the button's own entity, to choose the
+ * element that is tinted, or has its sprite changed, for each visual state.
  *
  * You should never need to use the ButtonComponent constructor directly. To add a
  * ButtonComponent to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('element', {
- *     type: pc.ELEMENTTYPE_IMAGE,
+ *     type: ELEMENTTYPE_IMAGE,
  *     useInput: true
  * });
- * entity.addComponent('button');
+ * entity.addComponent('button', {
+ *     imageEntity: entity
+ * });
  * ```
  *
  * Once the ButtonComponent is added to the entity, you can access it via the
  * {@link Entity#button} property:
  *
  * ```javascript
- * entity.button.hoverTint = pc.Color.YELLOW; // Set the hover tint color
+ * entity.button.hoverTint = Color.YELLOW; // Set the hover tint color
  *
  * console.log(entity.button.hoverTint);      // Get the hover tint color and print it
  * ```
  *
  * Relevant Engine API examples:
  *
- * - [Basic Button](https://playcanvas.github.io/#/user-interface/button-basic)
- * - [Sprite Button](https://playcanvas.github.io/#/user-interface/button-sprite)
+ * - [Buttons](https://playcanvas.github.io/#/user-interface/buttons)
+ * - [Toggles and radio groups](https://playcanvas.github.io/#/user-interface/common-widgets)
  *
  * @hideconstructor
  * @category User Interface

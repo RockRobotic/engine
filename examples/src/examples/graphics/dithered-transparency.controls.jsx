@@ -7,7 +7,15 @@ import {
     SelectInput
 } from '@playcanvas/pcui/react';
 
-import * as pc from 'playcanvas';
+import {
+    DITHER_BAYER2,
+    DITHER_BAYER4,
+    DITHER_BAYER8,
+    DITHER_BAYER16,
+    DITHER_BLUENOISE,
+    DITHER_IGNNOISE,
+    DITHER_NONE
+} from 'playcanvas';
 
 /**
  * @import { Observer } from '@playcanvas/observer'
@@ -46,10 +54,13 @@ export function Controls({ observer }) {
                         link={{ observer, path: 'data.opacityDither' }}
                         type='string'
                         options={[
-                            { v: pc.DITHER_NONE, t: 'None' },
-                            { v: pc.DITHER_BAYER8, t: 'Bayer8' },
-                            { v: pc.DITHER_BLUENOISE, t: 'BlueNoise' },
-                            { v: pc.DITHER_IGNNOISE, t: 'IGNNoise' }
+                            { v: DITHER_NONE, t: 'None' },
+                            { v: DITHER_BAYER2, t: 'Bayer2' },
+                            { v: DITHER_BAYER4, t: 'Bayer4' },
+                            { v: DITHER_BAYER8, t: 'Bayer8' },
+                            { v: DITHER_BAYER16, t: 'Bayer16' },
+                            { v: DITHER_BLUENOISE, t: 'BlueNoise' },
+                            { v: DITHER_IGNNOISE, t: 'IGNNoise' }
                         ]}
                     />
                 </LabelGroup>
@@ -59,10 +70,13 @@ export function Controls({ observer }) {
                         link={{ observer, path: 'data.opacityShadowDither' }}
                         type='string'
                         options={[
-                            { v: pc.DITHER_NONE, t: 'None' },
-                            { v: pc.DITHER_BAYER8, t: 'Bayer8' },
-                            { v: pc.DITHER_BLUENOISE, t: 'BlueNoise' },
-                            { v: pc.DITHER_IGNNOISE, t: 'IGNNoise' }
+                            { v: DITHER_NONE, t: 'None' },
+                            { v: DITHER_BAYER2, t: 'Bayer2' },
+                            { v: DITHER_BAYER4, t: 'Bayer4' },
+                            { v: DITHER_BAYER8, t: 'Bayer8' },
+                            { v: DITHER_BAYER16, t: 'Bayer16' },
+                            { v: DITHER_BLUENOISE, t: 'BlueNoise' },
+                            { v: DITHER_IGNNOISE, t: 'IGNNoise' }
                         ]}
                     />
                 </LabelGroup>

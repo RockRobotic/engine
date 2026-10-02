@@ -754,7 +754,7 @@ export const ambientSrcNames = {
     [AMBIENTSRC_CONSTANT]: 'CONSTANT'
 };
 
-// 16 bits for shader defs
+// the shader defines of a mesh instance: flags in the lowest 24 bits, see SHADERDEF_MASK_SHIFT
 export const SHADERDEF_NOSHADOW = 1;
 export const SHADERDEF_SKIN = 2;
 export const SHADERDEF_UV0 = 4;
@@ -770,6 +770,10 @@ export const SHADERDEF_MORPH_NORMAL = 2048;
 export const SHADERDEF_LMAMBIENT = 4096; // lightmaps contain ambient
 export const SHADERDEF_MORPH_TEXTURE_BASED_INT = 8192;
 export const SHADERDEF_BATCH = 16384;
+export const SHADERDEF_INSTANCEINDEX = 32768; // the draws use the instance index themselves
+
+// the shift of the light mask of a mesh instance, in the top 8 bits of its shader defines
+export const SHADERDEF_MASK_SHIFT = 24;
 
 /**
  * The shadow map is not to be updated.
@@ -792,10 +796,41 @@ export const SHADOWUPDATE_THISFRAME = 1;
  */
 export const SHADOWUPDATE_REALTIME = 2;
 
-// flags used on the mask property of the Light, and also on mask property of the MeshInstance
+/**
+ * Light mask bit: on a light, it lights mesh instances that are lit at runtime rather than from a
+ * lightmap; on a mesh instance, it is lit at runtime by such lights. This is the default mask
+ * value of both {@link LightComponent#mask} and {@link MeshInstance#mask}.
+ *
+ * @ignore
+ */
 export const MASK_AFFECT_DYNAMIC = 1;
+
+/**
+ * Light mask bit: on a light, it lights mesh instances that are lightmapped; on a mesh instance,
+ * it receives its lighting from a lightmap and is lit at runtime only by lights carrying this bit.
+ * See {@link LightComponent#mask} and {@link MeshInstance#mask}.
+ *
+ * @ignore
+ */
 export const MASK_AFFECT_LIGHTMAPPED = 2;
+
+/**
+ * Light mask bit: on a light, it is baked into lightmaps by the {@link Lightmapper}; on a mesh
+ * instance, it is a lightmap target that such lights bake into. See {@link LightComponent#mask}
+ * and {@link MeshInstance#mask}.
+ *
+ * @ignore
+ */
 export const MASK_BAKE = 4;
+
+/**
+ * The light mask bits under which a light is applied at runtime. A light carrying none of them
+ * contributes only to lightmaps, reaches no mesh instance while rendering, and so takes no light
+ * slot in a shader. See {@link MASK_AFFECT_DYNAMIC} and {@link MASK_AFFECT_LIGHTMAPPED}.
+ *
+ * @ignore
+ */
+export const MASK_AFFECT_RUNTIME = MASK_AFFECT_DYNAMIC | MASK_AFFECT_LIGHTMAPPED;
 
 /**
  * Render shaded materials using forward rendering.
@@ -1063,11 +1098,32 @@ export const SKYTYPE_DOME = 'dome';
 export const DITHER_NONE = 'none';
 
 /**
+ * Opacity is dithered using a Bayer 2 matrix.
+ *
+ * @category Graphics
+ */
+export const DITHER_BAYER2 = 'bayer2';
+
+/**
+ * Opacity is dithered using a Bayer 4 matrix.
+ *
+ * @category Graphics
+ */
+export const DITHER_BAYER4 = 'bayer4';
+
+/**
  * Opacity is dithered using a Bayer 8 matrix.
  *
  * @category Graphics
  */
 export const DITHER_BAYER8 = 'bayer8';
+
+/**
+ * Opacity is dithered using a Bayer 16 matrix.
+ *
+ * @category Graphics
+ */
+export const DITHER_BAYER16 = 'bayer16';
 
 /**
  * Opacity is dithered using a blue noise.
@@ -1083,9 +1139,34 @@ export const DITHER_BLUENOISE = 'bluenoise';
  */
 export const DITHER_IGNNOISE = 'ignnoise';
 
+/**
+ * Parallax mapping computes the uv offset from a single tap of the height map. This is the cheapest
+ * option, and suits shallow surface detail.
+ *
+ * @category Graphics
+ */
+export const PARALLAX_OFFSET = 'offset';
+
+/**
+ * Parallax occlusion mapping marches the view ray through the height field to find where it meets
+ * the displaced surface. This costs more than {@link PARALLAX_OFFSET}, but represents deeper
+ * displacement without smearing the texture.
+ *
+ * @category Graphics
+ */
+export const PARALLAX_OCCLUSION = 'occlusion';
+
+export const parallaxNames = {
+    [PARALLAX_OFFSET]: 'OFFSET',
+    [PARALLAX_OCCLUSION]: 'OCCLUSION'
+};
+
 export const ditherNames = {
     [DITHER_NONE]: 'NONE',
+    [DITHER_BAYER2]: 'BAYER2',
+    [DITHER_BAYER4]: 'BAYER4',
     [DITHER_BAYER8]: 'BAYER8',
+    [DITHER_BAYER16]: 'BAYER16',
     [DITHER_BLUENOISE]: 'BLUENOISE',
     [DITHER_IGNNOISE]: 'IGNNOISE'
 };
@@ -1236,6 +1317,30 @@ export const GSPLAT_RENDERER_RASTER_GPU_SORT = 2;
 export const GSPLAT_RENDERER_COMPUTE = 3;
 
 /**
+ * The splat budget is a target: LOD detail is raised until {@link GSplatParams#splatBudget} is
+ * used up, wherever the camera is. The LOD distances of each GSplat still shape how detail falls
+ * off with distance and how it divides between GSplats, but not how much of it there is. The
+ * default.
+ *
+ * @category Graphics
+ */
+export const GSPLAT_BUDGET_TARGET = 'target';
+
+/**
+ * The splat budget is a limit: the LOD distances of each GSplat decide the detail, and
+ * {@link GSplatParams#splatBudget} only lowers it when they would ask for more splats than it
+ * allows. A distant GSplat uses only the few splats its distance calls for, leaving the rest of
+ * the budget unused.
+ *
+ * @category Graphics
+ */
+export const GSPLAT_BUDGET_LIMIT = 'limit';
+
+// deprecated
+export const GSPLAT_LODMODE_ERROR = 'error';
+export const GSPLAT_LODMODE_DISTANCE = 'distance';
+
+/**
  * No debug rendering for Gaussian splats. Normal rendering mode.
  *
  * @type {number}
@@ -1283,29 +1388,63 @@ export const GSPLAT_DEBUG_NODE_AABBS = 5;
 /**
  * Automatically selects the best radix sort backend for the current WebGPU device:
  * OneSweep on supported hardware (NVIDIA), the portable backend elsewhere. See
- * {@link ComputeRadixSort}.
+ * `ComputeRadixSort`.
  *
  * @type {number}
- * @category Graphics
+ * @ignore
  */
 export const RADIX_SORT_AUTO = 0;
 
 /**
  * Portable radix sort backend. Runs on every WebGPU device (no subgroup
  * intrinsics required) and is chosen by {@link RADIX_SORT_AUTO} when no
- * faster hardware-specific backend is available. See {@link ComputeRadixSort}.
+ * faster hardware-specific backend is available. See `ComputeRadixSort`.
  *
  * @type {number}
- * @category Graphics
+ * @ignore
  */
 export const RADIX_SORT_PORTABLE = 1;
 
 /**
  * Single-sweep 8-bit radix sort (OneSweep). Requires subgroup support, 32-lane
  * subgroups, and forward-thread-progress guarantees — currently enabled only on
- * NVIDIA. See {@link ComputeRadixSort}.
+ * NVIDIA. See `ComputeRadixSort`.
  *
  * @type {number}
- * @category Graphics
+ * @ignore
  */
 export const RADIX_SORT_ONESWEEP = 2;
+
+/**
+ * The name of the scene depth texture - a scene texture storing the linear depth of the scene,
+ * rendered by the scene pass alongside the scene color. See
+ * {@link CameraShaderParams#sceneTextures}.
+ *
+ * @type {string}
+ * @ignore
+ */
+export const SCENETEXTURE_DEPTH = 'depth';
+
+/**
+ * The uniform each scene texture is published under by the render pass which rendered it. Note that
+ * the depth uses the same uniform as the depth prepass, as those are two producers of the same thing,
+ * and the consumers sample whichever of them ran later in the frame.
+ *
+ * @type {Object<string, string>}
+ * @ignore
+ */
+export const sceneTextureUniformNames = {
+    [SCENETEXTURE_DEPTH]: 'uSceneDepthMap'
+};
+
+/**
+ * The uniforms a mesh instance publishes its own lightmaps under, the color lightmap first and the
+ * directional one second, matching the order of the lightmapper's bake passes. The color one is
+ * deliberately not `texture_lightMap`, the uniform of a lightmap assigned to a material, so that a
+ * mesh instance keeping a lightmap of its own leaves the material's lightmap alone. A mesh instance
+ * lightmap takes priority when both are present.
+ *
+ * @type {string[]}
+ * @ignore
+ */
+export const instanceLightmapUniformNames = ['instance_lightMap', 'texture_dirLightMap'];

@@ -59,7 +59,8 @@ const _properties = [
     'penumbraSize',
     'penumbraFalloff',
     'shadowSamples',
-    'shadowBlockerSamples'
+    'shadowBlockerSamples',
+    'volumetricScattering'
 ];
 
 /**
@@ -73,14 +74,40 @@ const _properties = [
  * - `spot`: A local light that emits light similarly to an omni light but is bounded by a cone
  * centered on the owner entity's negative y-axis. Emulates flashlights, spotlights, etc.
  *
+ * Directional and spot lights are therefore aimed with the owner entity's rotation, and shine along
+ * its negative y-axis - so an unrotated light shines straight down. Note that
+ * {@link GraphNode#lookAt} orients an entity's negative z-axis, which aims a camera but not a
+ * light:
+ *
+ * ```javascript
+ * // an unrotated light shines straight down
+ * light.setEulerAngles(0, 0, 0);
+ *
+ * // tilted 45 degrees, it shines down and towards negative z
+ * light.setEulerAngles(45, 0, 0);
+ *
+ * // to aim it at a target, lookAt orients the negative z-axis and the extra rotation brings the
+ * // negative y-axis onto it
+ * light.lookAt(target.getPosition());
+ * light.rotateLocal(90, 0, 0);
+ *
+ * // to aim it along a world space direction, rotate the negative y-axis onto that direction.
+ * // Unlike lookAt, this is well defined even when the direction is straight up or down
+ * const dir = new Vec3(-0.5, -1, -0.3).normalize();
+ * light.setRotation(new Quat().setFromDirections(Vec3.DOWN, dir));
+ *
+ * // the direction a light currently shines in is the negative of its world space up vector
+ * const currentDir = light.up.clone().mulScalar(-1);
+ * ```
+ *
  * You should never need to use the LightComponent constructor directly. To add a LightComponent
  * to an {@link Entity}, use {@link Entity#addComponent}:
  *
  * ```javascript
- * const entity = new pc.Entity();
+ * const entity = new Entity();
  * entity.addComponent('light', {
  *     type: 'omni',
- *     color: new pc.Color(1, 0, 0),
+ *     color: new Color(1, 0, 0),
  *     intensity: 2
  * });
  * ```
@@ -212,7 +239,7 @@ class LightComponent extends Component {
 
     /**
      * Preserves the user-facing type string. Required because `'point'` and `'omni'` both map to
-     * the same underlying int on the {@link Light}, so reverse-mapping would normalise the user's
+     * the same underlying int on the {@link Light}, so reverse-mapping would normalize the user's
      * input.
      *
      * @type {string}
@@ -256,7 +283,7 @@ class LightComponent extends Component {
      * - `"spot"`: A local light that emits light similarly to an omni light but is bounded by a
      * cone centered on the owner entity's negative y-axis.
      *
-     * Defaults to `"directional"`.
+     * Defaults to `"directional"`. See {@link LightComponent} for how a light is aimed.
      *
      * @type {string}
      */
@@ -388,6 +415,10 @@ class LightComponent extends Component {
     /**
      * Sets whether the light will cast shadows. Defaults to false.
      *
+     * For a directional light, shadows are only rendered out to
+     * {@link LightComponent#shadowDistance} from the viewpoint, which defaults to 40. Size that to
+     * the area the camera actually sees, or shadows simply stop appearing beyond it.
+     *
      * @type {boolean}
      */
     set castShadows(value) {
@@ -440,6 +471,27 @@ class LightComponent extends Component {
      */
     get shadowIntensity() {
         return this._light.shadowIntensity;
+    }
+
+    /**
+     * Sets a multiplier of the light's contribution to the volumetric fog, allowing individual
+     * lights to scatter more or less light than the others, or none at all when set to 0. Only
+     * used by omni and spot lights, when {@link CameraFrame} renders volumetric fog with local
+     * lights enabled. Defaults to 1.
+     *
+     * @type {number}
+     */
+    set volumetricScattering(value) {
+        this._light.volumetricScattering = value;
+    }
+
+    /**
+     * Gets the multiplier of the light's contribution to the volumetric fog.
+     *
+     * @type {number}
+     */
+    get volumetricScattering() {
+        return this._light.volumetricScattering;
     }
 
     /**
@@ -503,7 +555,9 @@ class LightComponent extends Component {
     /**
      * Sets the blend factor for cascaded shadow maps, defining the fraction of each cascade level
      * used for blending between adjacent cascades. The value should be between 0 and 1. Defaults
-     * to 0, which disables blending between cascades.
+     * to 0, which disables blending between cascades and fading at the shadow distance. Also fades
+     * shadows to fully lit over this fraction of the shadow distance, including when using a single
+     * cascade. For example, a value of 0.1 fades shadows over the last 10% of the shadow distance.
      *
      * @type {number}
      */
@@ -1002,12 +1056,12 @@ class LightComponent extends Component {
 
     /**
      * Sets the bitmask that determines which {@link MeshInstance}s are lit by this light. The
-     * value is composed from {@link MASK_AFFECT_DYNAMIC}, {@link MASK_AFFECT_LIGHTMAPPED} and
-     * {@link MASK_BAKE}. The {@link affectDynamic}, {@link affectLightmapped} and {@link bake}
-     * helpers write to the same underlying mask but maintain their own state and are not
-     * recomputed from `mask`, so writing `mask` directly will not update those helpers (and a
-     * subsequent write to a helper may overwrite bits set via `mask`). Defaults to
-     * {@link MASK_AFFECT_DYNAMIC}.
+     * value is composed from `MASK_AFFECT_DYNAMIC`, `MASK_AFFECT_LIGHTMAPPED` and
+     * `MASK_BAKE`, and only its lowest 8 bits are used. The {@link affectDynamic},
+     * {@link affectLightmapped} and {@link bake} helpers write to the same underlying mask but
+     * maintain their own state and are not recomputed from `mask`, so writing `mask` directly
+     * will not update those helpers (and a subsequent write to a helper may overwrite bits set via
+     * `mask`). Defaults to `MASK_AFFECT_DYNAMIC`.
      *
      * @type {number}
      */
@@ -1026,7 +1080,7 @@ class LightComponent extends Component {
 
     /**
      * Sets whether the light will affect non-lightmapped objects. Toggles the
-     * {@link MASK_AFFECT_DYNAMIC} bit on {@link mask}. Defaults to true.
+     * `MASK_AFFECT_DYNAMIC` bit on {@link mask}. Defaults to true.
      *
      * @type {boolean}
      */
@@ -1052,7 +1106,7 @@ class LightComponent extends Component {
 
     /**
      * Sets whether the light will affect lightmapped objects. Toggles the
-     * {@link MASK_AFFECT_LIGHTMAPPED} bit on {@link mask}. Mutually exclusive with {@link bake} on
+     * `MASK_AFFECT_LIGHTMAPPED` bit on {@link mask}. Mutually exclusive with {@link bake} on
      * the mask: enabling one clears the other's mask bit. Defaults to false.
      *
      * @type {boolean}
@@ -1079,7 +1133,7 @@ class LightComponent extends Component {
     }
 
     /**
-     * Sets whether the light will be rendered into lightmaps. Toggles the {@link MASK_BAKE} bit
+     * Sets whether the light will be rendered into lightmaps. Toggles the `MASK_BAKE` bit
      * on {@link mask}. Mutually exclusive with {@link affectLightmapped} on the mask: enabling one
      * clears the other's mask bit. Defaults to false.
      *
@@ -1312,10 +1366,12 @@ class LightComponent extends Component {
         if (this.enabled && this.entity.enabled) {
             this.addLightToLayers();
         }
-        oldComp.off('add', this.onLayerAdded, this);
-        oldComp.off('remove', this.onLayerRemoved, this);
-        newComp.on('add', this.onLayerAdded, this);
-        newComp.on('remove', this.onLayerRemoved, this);
+
+        // store the new handles, so that onDisable can unsubscribe from the current composition
+        this._evtLayerAdded?.off();
+        this._evtLayerAdded = newComp.on('add', this.onLayerAdded, this);
+        this._evtLayerRemoved?.off();
+        this._evtLayerRemoved = newComp.on('remove', this.onLayerRemoved, this);
     }
 
     onLayerAdded(layer) {
@@ -1380,7 +1436,7 @@ class LightComponent extends Component {
             return;
         }
 
-        this.cookie = this._cookieAsset.resource;
+        this.cookie = /** @type {Texture} */ (this._cookieAsset.resource);
     }
 
     onCookieAssetRemove() {

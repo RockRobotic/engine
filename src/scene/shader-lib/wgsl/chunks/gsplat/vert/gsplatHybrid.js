@@ -32,6 +32,12 @@ attribute vertex_position: vec3f;
 
 uniform viewport_size: vec4f;
 
+// The cache stores canonical (unflipped) clip positions - this per-pass +-1 uniform, set by the
+// renderer from the render target's flipY, applies the target's vertical orientation to the
+// final position only. This keeps the projector cache valid for any raster target (forward,
+// prepass, pick), with the flip resolved at rasterization time.
+uniform projectionFlipY: f32;
+
 // -inverse(matrix_projection)[row 2]; lets the VS reconstruct linear view
 // depth from clipPos via dot(clipToViewZ, clip). Set per-camera by the
 // renderer (see GSplatHybridRenderer).
@@ -61,18 +67,21 @@ var<storage, read> projCache: array<u32>;
 var<storage, read> numSplatsStorage: array<u32>;
 
 varying gaussianUV: half2;
-varying gaussianColor: half4;
+varying @interpolate(flat, either) gaussianColor: half4;
 
-#ifndef DITHER_NONE
-    varying id: f32;
+// Must match the fragment side exactly (see gsplatPS) - the dither id is the only consumer.
+#if defined(GSPLAT_STOCHASTIC) && !defined(DITHER_NONE)
+    varying @interpolate(flat, either) stochasticId: u32;
+#elif !defined(DITHER_NONE)
+    varying @interpolate(flat, either) id: f32;
 #endif
 
-#ifdef PREPASS_PASS
-    varying vLinearDepth: f32;
+#if defined(PREPASS_PASS) || defined(SCENE_TEXTURE_DEPTH)
+    varying @interpolate(flat, either) vLinearDepth: f32;
 #endif
 
 #if defined(GSPLAT_UNIFIED_ID) && defined(PICK_PASS)
-    varying @interpolate(flat) vPickId: u32;
+    varying @interpolate(flat, either) vPickId: u32;
 #endif
 
 #ifdef GSPLAT_OVERDRAW
@@ -87,7 +96,7 @@ const discardVec: vec4f = vec4f(0.0, 0.0, 2.0, 1.0);
 fn vertexMain(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
 
-    // Same instance/quad linearisation as gsplatSourceVS:
+    // Same instance/quad linearization as gsplatSourceVS:
     // order = instanceIdx * GSPLAT_INSTANCE_SIZE + perInstanceQuadIdx.
     let order = pcInstanceIndex * {GSPLAT_INSTANCE_SIZE}u + u32(vertex_position.z);
 
@@ -97,7 +106,16 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         return output;
     }
 
-    let cacheIdx = sortedIndices[order];
+    // The cache index follows the data layout: a stochastic view ran no sort, so the cache is
+    // consumed in compacted order and sortedIndices carries stable splat IDs instead.
+    #ifdef GSPLAT_STOCHASTIC
+        let cacheIdx = order;
+        #ifndef DITHER_NONE
+            output.stochasticId = sortedIndices[order];
+        #endif
+    #else
+        let cacheIdx = sortedIndices[order];
+    #endif
     let base = cacheIdx * {CACHE_STRIDE}u;
 
     #ifdef GSPLAT_XR
@@ -141,7 +159,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 
         #ifdef PICK_PASS
             // In the pick path slot 6 is repurposed as the picking ID; alpha is the only
-            // colour we care about in the FS gate. Slot 7's r channel is unused.
+            // color we care about in the FS gate. Slot 7's r channel is unused.
             var clr: half4 = half4(half(0.0), half(0.0), half(0.0), alpha);
         #else
             let rg = unpack2x16float(projCache[base + 6u]);
@@ -166,7 +184,10 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     let pixelOffset = cornerClipped.x * v1 + cornerClipped.y * v2;
     let clipOffset = pixelOffset * c;
 
-    output.position = proj + vec4f(clipOffset, 0.0, 0.0);
+    // flipping the final position (center + offset together) vertically mirrors the whole splat,
+    // which is the correct application of the target orientation to the canonical cached data
+    let pos = proj + vec4f(clipOffset, 0.0, 0.0);
+    output.position = vec4f(pos.x, pos.y * uniform.projectionFlipY, pos.z, pos.w);
     output.gaussianUV = half2(cornerClipped);
 
     // read user varying values from the projection cache and pass them to the outputs
@@ -186,7 +207,7 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
     #endif
 
     #ifdef GSPLAT_OVERDRAW
-        // Overdraw mode renders a flat colour ramp; depth-shade input not needed.
+        // Overdraw mode renders a flat color ramp; depth-shade input not needed.
         let t: f32 = clamp(viewDepth / 20.0, 0.0, 1.0);
         let rampColor: vec3f = textureSampleLevel(colorRamp, colorRampSampler, vec2f(t, 0.5), 0.0).rgb;
         let outAlpha = alpha * half(1.0 / 32.0) * half(uniform.colorRampIntensity);
@@ -198,12 +219,12 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
         );
     #endif
 
-    #ifndef DITHER_NONE
+    #if !defined(DITHER_NONE) && !defined(GSPLAT_STOCHASTIC)
         // Best-effort id from the cache index — used only for blue-noise dither.
         output.id = f32(cacheIdx);
     #endif
 
-    #ifdef PREPASS_PASS
+    #if defined(PREPASS_PASS) || defined(SCENE_TEXTURE_DEPTH)
         output.vLinearDepth = viewDepth;
     #endif
 

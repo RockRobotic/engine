@@ -21,10 +21,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js 22.x
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24.x
           cache: "npm"
@@ -47,10 +47,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js 22.x
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24.x
           cache: "npm"
@@ -61,16 +61,19 @@ jobs:
       - name: Build API reference manual
         run: npm run docs
 
+      - name: Build Scripts API reference manual
+        run: npm run docs:scripts
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js 22.x
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24.x
           cache: "npm"
@@ -93,10 +96,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js 22.x
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24.x
           cache: "npm"
@@ -116,10 +119,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js 22.x
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24.x
           cache: "npm"
@@ -130,16 +133,16 @@ jobs:
       - name: Run unit tests
         run: npm test
 
-  build-examples:
-    name: Build Examples Browser
+  unit-test-webgpu:
+    name: Unit Test (WebGPU)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v7.0.1
 
       - name: Setup Node.js 22.x
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: 24.x
           cache: "npm"
@@ -147,8 +150,38 @@ jobs:
       - name: Install dependencies
         run: npm clean-install --progress=false --no-fund
 
+      - name: Run unit tests on WebGPU (Dawn)
+        run: npm run test:webgpu
+
+  build-examples:
+    name: Build Examples Browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm clean-install --progress=false --no-fund
+
+      - name: Install examples dependencies
+        working-directory: ./examples
+        run: npm clean-install --progress=false --no-fund
+
+      - name: Run Prettier on examples
+        working-directory: ./examples
+        run: npm run fmt
+
+      - name: Run ESLint on examples
+        working-directory: ./examples
+        run: npm run lint
+
       - name: Build Examples Browser
         working-directory: ./examples
-        run: |
-          npm clean-install --progress=false --no-fund
-          npm run build
+        run: npm run build

@@ -9,7 +9,14 @@ import {
     SliderInput
 } from '@playcanvas/pcui/react';
 
-import * as pc from 'playcanvas';
+import {
+    SHADOW_PCF1_16F,
+    SHADOW_PCF1_32F,
+    SHADOW_PCF3_16F,
+    SHADOW_PCF3_32F,
+    SHADOW_PCF5_16F,
+    SHADOW_PCF5_32F
+} from 'playcanvas';
 
 /**
  * @import { Observer } from '@playcanvas/observer'
@@ -52,12 +59,12 @@ export function Controls({ observer }) {
                         link={{ observer, path: 'settings.shadowType' }}
                         type='number'
                         options={[
-                            { v: pc.SHADOW_PCF1_32F, t: 'PCF1_32F' },
-                            { v: pc.SHADOW_PCF3_32F, t: 'PCF3_32F' },
-                            { v: pc.SHADOW_PCF5_32F, t: 'PCF5_32F' },
-                            { v: pc.SHADOW_PCF1_16F, t: 'PCF1_16F' },
-                            { v: pc.SHADOW_PCF3_16F, t: 'PCF3_16F' },
-                            { v: pc.SHADOW_PCF5_16F, t: 'PCF5_16F' }
+                            { v: SHADOW_PCF1_32F, t: 'PCF1_32F' },
+                            { v: SHADOW_PCF3_32F, t: 'PCF3_32F' },
+                            { v: SHADOW_PCF5_32F, t: 'PCF5_32F' },
+                            { v: SHADOW_PCF1_16F, t: 'PCF1_16F' },
+                            { v: SHADOW_PCF3_16F, t: 'PCF3_16F' },
+                            { v: SHADOW_PCF5_16F, t: 'PCF5_16F' }
                         ]}
                     />
                 </LabelGroup>
@@ -112,6 +119,21 @@ export function Controls({ observer }) {
                         binding={new BindingTwoWay()}
                         link={{ observer, path: 'settings.numLights' }}
                         value={observer.get('settings.numLights')}
+                    />
+                </LabelGroup>
+                <LabelGroup text='16bit Index'>
+                    <BooleanInput
+                        type='toggle'
+                        binding={new BindingTwoWay()}
+                        link={{ observer, path: 'settings.use16BitIndex' }}
+                        value={observer.get('settings.use16BitIndex')}
+                    />
+                </LabelGroup>
+                <LabelGroup text='Max Lights'>
+                    <Label
+                        binding={new BindingTwoWay()}
+                        link={{ observer, path: 'settings.maxLightsInfo' }}
+                        value={observer.get('settings.maxLightsInfo')}
                     />
                 </LabelGroup>
             </Panel>

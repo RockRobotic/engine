@@ -78,7 +78,8 @@ const STATIC_ROUTES = [
     { url: '/icons/', root: 'src/static/icons' },
     { url: '/thumbnails/', root: 'thumbnails' },
     { url: '/modules/monaco-editor/min/vs/', root: 'node_modules/monaco-editor/min/vs' },
-    { url: '/modules/fflate/esm/', root: '../node_modules/fflate/esm' }
+    { url: '/modules/fflate/esm/', root: '../node_modules/fflate/esm' },
+    { url: '/modules/inspector/', root: 'node_modules/@playcanvas/inspector/src' }
 ];
 const ROOT_FILES = {
     '/styles.css': 'src/static/styles.css',
@@ -89,6 +90,7 @@ const ROOT_FILES = {
 const IFRAME_FILES = {
     '/iframe/context.mjs': 'iframe/context.mjs',
     '/iframe/files.mjs': 'iframe/files.mjs',
+    '/iframe/inspector.mjs': 'iframe/inspector.mjs',
     '/iframe/loader.mjs': 'iframe/loader.mjs',
     '/iframe/main.css': 'iframe/main.css',
     '/iframe/ministats.mjs': 'iframe/ministats.mjs',
@@ -291,6 +293,21 @@ const createUpdate = async (file, engine, logStart = null) => {
     const stamp = Date.now().toString(36);
     const item = exampleFromFile(abs);
     if (item) {
+
+        // the example source is gone, which is what a rename or a delete looks like from here. There
+        // is no update to send - the example list is read once at startup, so a new name needs a
+        // restart to appear - and reading its config would throw. Anything other than a missing file
+        // is a real problem, so it is left to the watcher's catch to report.
+        const source = getExamplePath(item, 'example.mjs');
+        try {
+            await fs.promises.stat(source);
+        } catch (err) {
+            if (err.code === 'ENOENT') {
+                return null;
+            }
+            throw err;
+        }
+
         const example = `/${item.categoryKebab}/${item.exampleNameKebab}`;
         logStart?.('example', example);
         return {
@@ -597,7 +614,11 @@ export const examplesDevServer = ({ hmr = true } = {}) => {
                             data
                         });
                     });
-                }, (err) => {
+
+                // as a trailing catch, not a rejection handler on the first link of the chain - that
+                // one leaves everything after it unhandled, and an unhandled rejection in a watcher
+                // callback takes the whole dev server down
+                }).catch((err) => {
                     server.config.logger.error(err.message);
                 });
             };
