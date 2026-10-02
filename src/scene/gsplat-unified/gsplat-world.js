@@ -766,14 +766,24 @@ class GSplatWorld {
      * @param {Uint32Array} orderData - The sorted order data.
      * @param {GraphNode} camera - The primary camera (for color bake on first sort).
      * @param {boolean} updateBounds - Whether to upload frustum-culling bounds (false for CPU sort).
-     * @param {{ rebuilt: boolean, count: number, textureSize: number }} result - Caller-owned result.
-     * @returns {{ rebuilt: boolean, count: number, textureSize: number }} The populated result.
+     * @param {{ rebuilt: boolean, count: number, textureSize: number, deferred?: boolean }} result - Caller-owned
+     * result. `deferred` is set when the order is being uploaded over several frames:
+     * the caller must keep `orderData` alive and drive {@link GSplatWorkBuffer#stepOrderUpload}.
+     * @returns {{ rebuilt: boolean, count: number, textureSize: number, deferred?: boolean }} The
+     * populated result.
      */
     onSorted(version, count, orderData, camera, updateBounds, result) {
         this.markSorted(version, count, camera, updateBounds, result);
+        result.deferred = false;
         if (this._worldStates.get(version)) {
-            // update order texture
-            this._workBuffer.setOrderData(orderData);
+            // Update the order texture. A re-sort of the state already on screen can be uploaded
+            // over several frames; the first sort of a new state rebuilt the work buffer just
+            // above and its order has to arrive with it.
+            if (!result.rebuilt && this._workBuffer.beginOrderUpload(orderData)) {
+                result.deferred = true;
+            } else {
+                this._workBuffer.setOrderData(orderData);
+            }
         }
         return result;
     }

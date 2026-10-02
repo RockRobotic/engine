@@ -38,6 +38,9 @@ class GSplatUnifiedSorter extends EventHandler {
     /** @type {boolean} */
     _destroyed = false;
 
+    /** @type {boolean} */
+    _orderDataRetained = false;
+
     /** @type {Scene|null} */
     scene = null;
 
@@ -102,11 +105,23 @@ class GSplatUnifiedSorter extends EventHandler {
         if (this.pendingSorted) {
             const { count, version, orderData } = this.pendingSorted;
             this.pendingSorted = null;
+            this._orderDataRetained = false;
             this.fire('sorted', count, version, orderData);
 
-            // reuse order data
-            this.releaseOrderData(orderData);
+            // reuse order data, unless the handler is still uploading from it
+            if (!this._orderDataRetained) {
+                this.releaseOrderData(orderData);
+            }
         }
+    }
+
+    /**
+     * Called from a 'sorted' handler to keep the order data it was given past the event, for an
+     * upload that takes several frames. The handler returns it with {@link releaseOrderData} when
+     * done, or simply drops it.
+     */
+    retainOrderData() {
+        this._orderDataRetained = true;
     }
 
     releaseOrderData(orderData) {

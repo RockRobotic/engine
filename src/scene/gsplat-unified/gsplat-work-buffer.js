@@ -1,4 +1,5 @@
 import { Debug, DebugHelper } from '../../core/debug.js';
+import { now } from '../../core/time.js';
 import {
     ADDRESS_CLAMP_TO_EDGE, PIXELFORMAT_R32U, PIXELFORMAT_RGBA16U,
     BUFFERUSAGE_COPY_DST, RENDERTARGET_ORIGIN_BOTTOM, SEMANTIC_POSITION, getGlslShaderType
@@ -16,11 +17,15 @@ import wgslGsplatCopyToWorkBufferPS from '../shader-lib/wgsl/chunks/gsplat/frag/
 import glslGsplatCopyInstancedQuadVS from '../shader-lib/glsl/chunks/gsplat/vert/gsplatCopyInstancedQuad.js';
 import wgslGsplatCopyInstancedQuadVS from '../shader-lib/wgsl/chunks/gsplat/vert/gsplatCopyInstancedQuad.js';
 import { GSplatFrustumCuller } from './gsplat-frustum-culler.js';
+import { GSplatOrderUploadPacer } from './gsplat-order-upload-pacer.js';
 import { GSplatWorkBufferRenderPass } from './gsplat-work-buffer-render-pass.js';
 import { GSplatStreams } from '../gsplat/gsplat-streams.js';
 
 let id = 0;
 const tempMap = new Map();
+
+// An order texture up to this size is uploaded in one call; a larger one is sliced over frames.
+const ORDER_DIRECT_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * @import { GSplatFormat } from '../gsplat/gsplat-format.js'
@@ -155,6 +160,26 @@ class GSplatWorkBuffer {
 
     /** @type {Texture|undefined} */
     orderTexture;
+
+    /**
+     * Second order texture a sliced upload is written to, then swapped with {@link orderTexture}.
+     * Created on first use (WebGL only).
+     *
+     * @type {Texture|null}
+     * @private
+     */
+    _orderTextureSpare = null;
+
+    /**
+     * The sliced order upload in progress, if any.
+     *
+     * @type {{ data: Uint32Array, row: number }|null}
+     * @private
+     */
+    _orderUpload = null;
+
+    /** @private */
+    _orderUploadPacer = new GSplatOrderUploadPacer();
 
     /** @type {StorageBuffer|undefined} */
     orderBuffer;
@@ -368,7 +393,9 @@ class GSplatWorkBuffer {
         this.renderPass?.destroy();
         this.colorRenderPass?.destroy();
         this.streams.destroy();
+        this._orderUpload = null;
         this.orderTexture?.destroy();
+        this._orderTextureSpare?.destroy();
         this.orderBuffer?.destroy();
         this.renderTarget?.destroy();
         this.colorRenderTarget?.destroy();
@@ -381,6 +408,9 @@ class GSplatWorkBuffer {
     }
 
     setOrderData(data) {
+        // a full upload supersedes one still being sliced in
+        this._orderUpload = null;
+
         const size = this.textureSize;
         if (this.device.isWebGPU) {
             Debug.assert(data.length <= size * size);
@@ -392,10 +422,100 @@ class GSplatWorkBuffer {
     }
 
     /**
+     * True while a sorted order is being uploaded a slice per frame.
+     *
+     * @type {boolean}
+     */
+    get orderUploadPending() {
+        return this._orderUpload !== null;
+    }
+
+    /**
+     * Starts uploading sorted order data a slice per frame into a spare texture, which replaces
+     * {@link orderTexture} once complete (WebGL only).
+     *
+     * A single upload of the whole order texture blocks the main thread for about a millisecond
+     * per megabyte: 35 ms for 8M splats, on every re-sort while the camera moves. Slices small
+     * enough for the browser to queue return at once, and writing them to a texture that is not
+     * being drawn with keeps every frame's order consistent.
+     *
+     * Only valid for a re-sort of the world state already on screen. The first sort of a new world
+     * state changes the layout of the work buffer and must use {@link setOrderData}, so the order
+     * arrives in the same frame.
+     *
+     * @param {Uint32Array} data - The order data. Kept until the upload completes or is cancelled.
+     * @returns {boolean} False when the upload should be done with {@link setOrderData} instead:
+     * on WebGPU, or when the texture is small enough to upload in one go.
+     */
+    beginOrderUpload(data) {
+        const size = this.textureSize;
+        if (this.device.isWebGPU || data.length !== size * size || data.byteLength <= ORDER_DIRECT_MAX_BYTES) {
+            return false;
+        }
+
+        if (!this._orderTextureSpare) {
+            this._orderTextureSpare = new Texture(this.device, {
+                name: 'SplatGlobalOrderSpare',
+                width: size,
+                height: size,
+                format: PIXELFORMAT_R32U,
+                mipmaps: false,
+                addressU: ADDRESS_CLAMP_TO_EDGE,
+                addressV: ADDRESS_CLAMP_TO_EDGE
+            });
+        } else if (this._orderTextureSpare.width !== size) {
+            this._orderTextureSpare.resize(size, size);
+        }
+
+        this._orderUpload = { data, row: 0 };
+        return true;
+    }
+
+    /**
+     * Uploads the next slice of a pending order upload. When the last slice is written the spare
+     * texture becomes {@link orderTexture}; the caller must then rebind it on the renderer.
+     *
+     * @returns {Uint32Array|null} The order data when the upload completed with this call,
+     * otherwise null.
+     */
+    stepOrderUpload() {
+        const upload = this._orderUpload;
+        const spare = this._orderTextureSpare;
+        if (!upload || !spare) return null;
+
+        const size = this.textureSize;
+        const rows = Math.min(this._orderUploadPacer.rows(size, 4), size - upload.row);
+        const start = upload.row * size;
+
+        const t0 = now();
+        this.uploadStream.upload(upload.data.subarray(start, start + rows * size), spare, start, rows * size);
+        this._orderUploadPacer.record(now() - t0);
+
+        upload.row += rows;
+        if (upload.row < size) return null;
+
+        // complete: the spare becomes the order texture, the old one the spare
+        this._orderTextureSpare = this.orderTexture ?? null;
+        this.orderTexture = spare;
+        this._orderUpload = null;
+        return upload.data;
+    }
+
+    /**
+     * Abandons a pending order upload. The order texture in use is left as it is.
+     */
+    cancelOrderUpload() {
+        this._orderUpload = null;
+    }
+
+    /**
      * @param {number} textureSize - The texture size to resize to.
      */
     resize(textureSize) {
         Debug.assert(textureSize);
+
+        // order data being sliced in was sized for the old texture
+        this._orderUpload = null;
         this.renderTarget.resize(textureSize, textureSize);
         this.colorRenderTarget.resize(textureSize, textureSize);
         this.streams.resize(textureSize, textureSize);
