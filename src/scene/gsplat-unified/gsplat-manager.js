@@ -171,7 +171,16 @@ class GSplatManager {
     _bakeResult = { rebuilt: false, count: 0, textureSize: 0, sortNeeded: false };
 
     /** @private */
-    _markResult = { rebuilt: false, count: 0, textureSize: 0, deferred: false };
+    _markResult = { rebuilt: false, count: 0, textureSize: 0 };
+
+    /** @type {{version: number, count: number, orderData: Uint32Array}|null} */
+    _stagedSort = null;
+
+    // A fresh renderer or work buffer has no complete CPU order to keep on screen.
+    _hasCpuOrder = false;
+
+    // On context restore, streamed states predating the octree's reload have lost their textures.
+    _minSortVersion = 0;
 
     /** @private */
     _formatResult = { bufferRecreated: false, sortNeeded: false };
@@ -277,9 +286,13 @@ class GSplatManager {
      */
     _onDeviceRestored() {
         // rows already written to the spare order texture were lost with the context
-        this.world.workBuffer.cancelOrderUpload();
+        this._cancelStagedSort();
+        this._hasCpuOrder = false;
 
-        if (this.world.hasOctreeInstances) return;
+        if (this.world.hasOctreeInstances) {
+            this._minSortVersion = this.world.lastWorldStateVersion + 1;
+            return;
+        }
         this.world.invalidate({ workBuffer: true });
         this.sortNeeded = true;
     }
@@ -290,7 +303,8 @@ class GSplatManager {
      * @private
      */
     destroyCpuSorting() {
-        this.world.workBuffer.cancelOrderUpload();
+        this._cancelStagedSort();
+        this._hasCpuOrder = false;
         this.cpuSorter?.destroy();
         this.cpuSorter = null;
     }
@@ -538,51 +552,65 @@ class GSplatManager {
     }
 
     onSorted(count, version, orderData) {
-        // World advances the render-ready version (cleanup + first-sort rebuild) and uploads the
-        // sorted order texture; the manager applies the renderer-side reactions. Frustum-culling
-        // bounds are only uploaded for non-CPU renderers (the CPU path doesn't allocate them).
-        const updateBounds = this.renderer.requiresBounds;
-        const result = this.world.onSorted(version, count, orderData, this.cameraNode, updateBounds, this._markResult);
-        if (result.rebuilt) {
-            this.renderer.update(result.count, result.textureSize);
-        }
+        if (version < this._minSortVersion || !this.world.getState(version)) return;
 
-        if (result.deferred) {
-            // the order is uploaded over the next frames, from this buffer (see _applySortResults)
+        if (this._hasCpuOrder && this.world.canStageOrder(version) && this.world.workBuffer.beginOrderUpload(orderData)) {
+            this._stagedSort = { count, version, orderData };
             this.cpuSorter?.retainOrderData();
-            return;
+        } else {
+            this._commitCpuSort(count, version, orderData);
         }
-
-        // update renderer with new order data
-        this.renderer.setOrderData();
     }
 
     /**
-     * Applies CPU sort results. A sorted order too large to upload in one frame without stalling
-     * is written to a spare texture a slice per frame; while that is in progress it is advanced
-     * here and the next result waits, unless that result is the first sort of a new world state,
-     * which cannot wait: it replaces the upload.
+     * Advances geometry, draw count and the bound order together. When the order has already been
+     * uploaded to the spare texture, the final upload step has swapped it into place.
+     *
+     * @param {number} count - Sorted splat count.
+     * @param {number} version - Matching world version.
+     * @param {Uint32Array} [orderData] - Order to upload immediately if it was not staged.
+     * @private
+     */
+    _commitCpuSort(count, version, orderData) {
+        const result = this.world.markSorted(version, count, this.cameraNode, this.renderer.requiresBounds, this._markResult);
+        if (orderData) this.world.workBuffer.setOrderData(orderData);
+        if (result.rebuilt) this.renderer.update(result.count, result.textureSize);
+        this.renderer.setOrderData();
+        this._hasCpuOrder = count > 0;
+    }
+
+    /** @private */
+    _cancelStagedSort() {
+        if (this._stagedSort) {
+            this.world.workBuffer.cancelOrderUpload();
+            this.cpuSorter?.releaseOrderData(this._stagedSort.orderData);
+            this._stagedSort = null;
+        }
+    }
+
+    /**
+     * Finishes one order while the sorter coalesces newer results. Restarting the upload for
+     * every LOD version would starve the display when streaming is faster than the upload.
+     * A placement change or resize takes priority once its order is available.
      *
      * @private
      */
     _applySortResults() {
         const sorter = /** @type {GSplatUnifiedSorter} */ (this.cpuSorter);
-        const workBuffer = this.world.workBuffer;
-
-        if (workBuffer.orderUploadPending) {
+        const staged = this._stagedSort;
+        if (staged) {
+            const workBuffer = this.world.workBuffer;
             const pending = sorter.pendingSorted;
-            const pendingState = pending ? this.world.getState(pending.version) : null;
-            if (pendingState && !pendingState.sortedBefore) {
-                workBuffer.cancelOrderUpload();
-            } else {
-                const orderData = workBuffer.stepOrderUpload();
-                if (orderData) {
-                    // the spare texture is now the order texture
-                    this.renderer.setOrderData();
-                    sorter.releaseOrderData(orderData);
+            if (workBuffer.orderUploadPending && this.world.canStageOrder(staged.version) &&
+                (!pending || this.world.canStageOrder(pending.version))) {
+                if (workBuffer.stepOrderUpload()) {
+                    this._commitCpuSort(staged.count, staged.version);
+                    sorter.releaseOrderData(staged.orderData);
+                    this._stagedSort = null;
                 }
                 return;
             }
+            this._cancelStagedSort();
         }
 
         sorter.applyPendingSorted();
@@ -663,6 +691,8 @@ class GSplatManager {
         // which reads the work buffer.
         this.world.syncFormat(this._formatResult);
         if (this._formatResult.bufferRecreated) {
+            this._cancelStagedSort();
+            this._hasCpuOrder = false;
             this.renderer.setDataSource(this.world.workBuffer);
             this.shadowRenderer?.setDataSource(this.world.workBuffer);
         }

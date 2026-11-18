@@ -128,6 +128,31 @@ class GSplatWorldState {
         this.buildBoundsGroups(splats);
     }
 
+    /**
+     * @param {GSplatWorldState} other - The previous world state.
+     * @returns {boolean} Whether the same placement groups occupy the two layouts.
+     */
+    hasSamePlacementGroups(other) {
+        const groups = this.boundsGroups;
+        if (groups.length !== other.boundsGroups.length) return false;
+        for (let i = 0; i < groups.length; i++) {
+            if (groups[i].splat.parentPlacementId !== other.boundsGroups[i].splat.parentPlacementId) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Applies file decrements once the old layout is no longer needed for rendering.
+     *
+     * @param {number} cooldownTicks - Ticks to keep unreferenced files before unloading.
+     */
+    releaseFiles(cooldownTicks) {
+        for (const [octree, fileIndex] of this.pendingReleases) {
+            octree.decRefCount(fileIndex, cooldownTicks);
+        }
+        this.pendingReleases.length = 0;
+    }
+
     destroy() {
         this.splats.forEach(splat => splat.destroy());
         this.splats.length = 0;

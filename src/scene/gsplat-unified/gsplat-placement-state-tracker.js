@@ -9,6 +9,10 @@
  * @ignore
  */
 class GSplatPlacementStateTracker {
+    static ADDED = 1;
+
+    static MODIFIED = 2;
+
     /**
      * WeakMap of placement to last seen state.
      * Using WeakMap allows automatic cleanup when placements are garbage collected.
@@ -22,10 +26,10 @@ class GSplatPlacementStateTracker {
      * Checks if any placements have changed state. Updates internal tracking.
      *
      * @param {Iterable<GSplatPlacement>} placements - Iterable of placements to check.
-     * @returns {boolean} True if any placement's state changed.
+     * @returns {number} Bitmask of ADDED (first seen) and MODIFIED (existing resource changed).
      */
-    hasChanges(placements) {
-        let changed = false;
+    getChanges(placements) {
+        let changes = 0;
 
         for (const p of placements) {
             if (!p.resource) continue;
@@ -39,7 +43,7 @@ class GSplatPlacementStateTracker {
             if (!state) {
                 // First time seeing this placement
                 this._states.set(p, { formatVersion, modifierHash, numSplats, centersVersion });
-                changed = true;
+                changes |= GSplatPlacementStateTracker.ADDED;
             } else if (state.formatVersion !== formatVersion ||
                        state.modifierHash !== modifierHash ||
                        state.numSplats !== numSplats ||
@@ -49,11 +53,11 @@ class GSplatPlacementStateTracker {
                 state.modifierHash = modifierHash;
                 state.numSplats = numSplats;
                 state.centersVersion = centersVersion;
-                changed = true;
+                changes |= GSplatPlacementStateTracker.MODIFIED;
             }
         }
 
-        return changed;
+        return changes;
     }
 }
 

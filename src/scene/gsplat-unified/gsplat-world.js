@@ -96,6 +96,9 @@ class GSplatWorld {
      */
     _currentVersion = 0;
 
+    // A first sort across a placement or configuration change must take effect immediately.
+    _lastStructuralVersion = 0;
+
     /** @type {boolean} */
     _worldStateDirty = false;
 
@@ -213,6 +216,7 @@ class GSplatWorld {
             for (const splat of worldState.splats) {
                 splat.resource.decRefCount();
             }
+            worldState.releaseFiles(0);
             worldState.destroy();
         }
         this._worldStates.clear();
@@ -611,16 +615,14 @@ class GSplatWorld {
     _updateWorldState(requireCenters) {
 
         // Check for state changes (format version, modifier hash, numSplats)
-        let stateChanged = this._stateTracker.hasChanges(this._layerPlacements);
+        let changes = this._stateTracker.getChanges(this._layerPlacements);
         for (const [, inst] of this._octreeInstances) {
-            if (this._stateTracker.hasChanges(inst.activePlacements)) {
-                stateChanged = true;
-            }
+            changes |= this._stateTracker.getChanges(inst.activePlacements);
         }
 
         // Recreate world state if there are changes
-        const placementsChanged = this._layerPlacementsDirty;
-        const worldChanged = placementsChanged || stateChanged || this._worldStates.size === 0 || this._worldStateDirty;
+        const previous = this.getState(this._lastWorldStateVersion);
+        const worldChanged = this._layerPlacementsDirty || changes || !previous || this._worldStateDirty;
         if (!worldChanged) {
             return false;
         }
@@ -661,6 +663,14 @@ class GSplatWorld {
             this._device, this._lastWorldStateVersion, splats,
             this._allocator, this._allocationMap
         );
+
+        // An LOD swap can add a child file after the dirty-flag poll or temporarily remove the
+        // last child of a parent. Compare the actual groups in the two snapshots to distinguish
+        // that churn from an added or removed scene placement.
+        if (!previous || !newState.hasSamePlacementGroups(previous) || (changes & GSplatPlacementStateTracker.MODIFIED) ||
+            this._worldStateDirty || this._gsplat.dirty) {
+            this._lastStructuralVersion = newState.version;
+        }
 
         // increment ref count for all resources in new state
         for (const splat of newState.splats) {
@@ -758,34 +768,19 @@ class GSplatWorld {
     }
 
     /**
-     * Applies a completed CPU sort: advances the render-ready version (via markSorted) and uploads
-     * the sorted order texture. The manager rebinds the renderer afterwards.
+     * Whether the current work-buffer layout can remain on screen while the order for this
+     * version is uploaded. Only camera re-sorts and streamed LOD changes can wait. A skipped
+     * placement change still has to take effect on the next sort that supersedes it.
      *
-     * @param {number} version - The sorted version.
-     * @param {number} count - The sorted splat count.
-     * @param {Uint32Array} orderData - The sorted order data.
-     * @param {GraphNode} camera - The primary camera (for color bake on first sort).
-     * @param {boolean} updateBounds - Whether to upload frustum-culling bounds (false for CPU sort).
-     * @param {{ rebuilt: boolean, count: number, textureSize: number, deferred?: boolean }} result - Caller-owned
-     * result. `deferred` is set when the order is being uploaded over several frames:
-     * the caller must keep `orderData` alive and drive {@link GSplatWorkBuffer#stepOrderUpload}.
-     * @returns {{ rebuilt: boolean, count: number, textureSize: number, deferred?: boolean }} The
-     * populated result.
+     * @param {number} version - The sorted world version.
+     * @returns {boolean} Whether it is safe to stage the order before baking this version.
      */
-    onSorted(version, count, orderData, camera, updateBounds, result) {
-        this.markSorted(version, count, camera, updateBounds, result);
-        result.deferred = false;
-        if (this._worldStates.get(version)) {
-            // Update the order texture. A re-sort of the state already on screen can be uploaded
-            // over several frames; the first sort of a new state rebuilt the work buffer just
-            // above and its order has to arrive with it.
-            if (!result.rebuilt && this._workBuffer.beginOrderUpload(orderData)) {
-                result.deferred = true;
-            } else {
-                this._workBuffer.setOrderData(orderData);
-            }
-        }
-        return result;
+    canStageOrder(version) {
+        const state = this.getState(version);
+        return !!state && !!this.currentState?.sortedBefore && !this._workBufferRebuildRequired &&
+            this._currentVersion >= this._lastStructuralVersion &&
+            state.textureSize === this._workBuffer.textureSize &&
+            (version === this._currentVersion || (this.hasOctreeInstances && state.totalActiveSplats > 0));
     }
 
     /**
@@ -889,15 +884,7 @@ class GSplatWorld {
         // update camera tracking for color updates
         this.updateColorCameraTracking(camera);
 
-        // apply pending file-release requests
-        if (worldState.pendingReleases && worldState.pendingReleases.length) {
-            const cooldownTicks = this._gsplat.cooldownTicks;
-            for (const [octree, fileIndex] of worldState.pendingReleases) {
-                // decrement once for each staged release; refcount system guards against premature unload
-                octree.decRefCount(fileIndex, cooldownTicks);
-            }
-            worldState.pendingReleases.length = 0;
-        }
+        worldState.releaseFiles(this._gsplat.cooldownTicks);
     }
 
     /**
@@ -950,6 +937,8 @@ class GSplatWorld {
                 for (const splat of oldState.splats) {
                     splat.resource.decRefCount();
                 }
+                // A state skipped by the sorter never had a first bake to release its files.
+                oldState.releaseFiles(this._gsplat.cooldownTicks);
                 this._worldStates.delete(v);
                 oldState.destroy();
             }

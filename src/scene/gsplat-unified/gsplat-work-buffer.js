@@ -439,9 +439,8 @@ class GSplatWorkBuffer {
      * enough for the browser to queue return at once, and writing them to a texture that is not
      * being drawn with keeps every frame's order consistent.
      *
-     * Only valid for a re-sort of the world state already on screen. The first sort of a new world
-     * state changes the layout of the work buffer and must use {@link setOrderData}, so the order
-     * arrives in the same frame.
+     * The caller keeps the visible layout in place until the final slice, then bakes the matching
+     * world state and binds the completed order in the same frame.
      *
      * @param {Uint32Array} data - The order data. Kept until the upload completes or is cancelled.
      * @returns {boolean} False when the upload should be done with {@link setOrderData} instead:
