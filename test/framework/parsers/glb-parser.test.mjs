@@ -1,7 +1,17 @@
 import { expect } from 'chai';
 import { restore, stub } from 'sinon';
 
+import { Color } from '../../../src/core/math/color.js';
+import { Asset } from '../../../src/framework/asset/asset.js';
+import {
+    KHR_materials_diffuse_transmission
+} from '../../../src/framework/parsers/glb/extensions/khr-materials-diffuse-transmission.js';
 import { GlbParser } from '../../../src/framework/parsers/glb-parser.js';
+import {
+    ADDRESS_CLAMP_TO_EDGE, ADDRESS_REPEAT, FILTER_LINEAR_MIPMAP_LINEAR, FILTER_NEAREST
+} from '../../../src/platform/graphics/constants.js';
+import { Texture } from '../../../src/platform/graphics/texture.js';
+import { StandardMaterial } from '../../../src/scene/materials/standard-material.js';
 import { createApp } from '../../app.mjs';
 import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
@@ -21,12 +31,12 @@ describe('GlbParser', function () {
         jsdomTeardown();
     });
 
-    const parseMaterial = (occlusionTexture) => {
+    const parseMaterial = (occlusionTexture, extensions) => {
         const gltf = {
             asset: { version: '2.0' },
             scenes: [],
             nodes: [],
-            materials: [{ occlusionTexture }]
+            materials: [{ occlusionTexture, extensions }]
         };
         const data = new TextEncoder().encode(JSON.stringify(gltf));
 
@@ -109,6 +119,206 @@ describe('GlbParser', function () {
         } finally {
             app2.destroy();
         }
+    });
+
+    describe('KHR_materials_diffuse_transmission', function () {
+
+        const parseExtension = (extension) => {
+            return parseMaterial(undefined, { KHR_materials_diffuse_transmission: extension });
+        };
+
+        it('imports the transmission and its color, which is converted to sRGB', async function () {
+            const material = await parseExtension({
+                diffuseTransmissionFactor: 0.25,
+                diffuseTransmissionColorFactor: [1, 0.5, 0.25]
+            });
+
+            expect(material.diffuseTransmission).to.equal(0.25);
+            const expected = new Color(1, 0.5, 0.25).gamma();
+            expect(material.diffuseTransmissionColor.r).to.be.closeTo(expected.r, 1e-6);
+            expect(material.diffuseTransmissionColor.g).to.be.closeTo(expected.g, 1e-6);
+            expect(material.diffuseTransmissionColor.b).to.be.closeTo(expected.b, 1e-6);
+        });
+
+        it('uses the defaults of the extension for the values it omits', async function () {
+            const material = await parseExtension({});
+
+            expect(material.diffuseTransmission).to.equal(0);
+            expect(material.diffuseTransmissionColor.equals(Color.WHITE)).to.equal(true);
+        });
+
+        it('reads the transmission from the alpha channel of its texture', function () {
+            const material = new StandardMaterial();
+            const textures = [new Texture(app.graphicsDevice), new Texture(app.graphicsDevice)];
+            KHR_materials_diffuse_transmission.apply({
+                diffuseTransmissionFactor: 1,
+                diffuseTransmissionTexture: { index: 0, texCoord: 1 },
+                diffuseTransmissionColorTexture: {
+                    index: 1,
+                    extensions: { KHR_texture_transform: { scale: [2, 3] } }
+                }
+            }, material, textures);
+
+            expect(material.diffuseTransmissionMap).to.equal(textures[0]);
+            expect(material.diffuseTransmissionMapChannel).to.equal('a');
+            expect(material.diffuseTransmissionMapUv).to.equal(1);
+            expect(material.diffuseTransmissionColorMap).to.equal(textures[1]);
+            expect(material.diffuseTransmissionColorMapChannel).to.equal('rgb');
+            expect(material.diffuseTransmissionColorMapTiling.x).to.equal(2);
+            expect(material.diffuseTransmissionColorMapTiling.y).to.equal(3);
+        });
+
+        it('loads only the color texture as sRGB', function () {
+            const colorTexture = { index: 1 };
+            expect(KHR_materials_diffuse_transmission.getColorTextures({
+                diffuseTransmissionTexture: { index: 0 },
+                diffuseTransmissionColorTexture: colorTexture
+            })).to.deep.equal([colorTexture]);
+            expect(KHR_materials_diffuse_transmission.getColorTextures({
+                diffuseTransmissionTexture: { index: 0 }
+            })).to.deep.equal([]);
+        });
+    });
+
+    describe('KHR_materials_sheen', function () {
+
+        const parseExtension = (extension) => {
+            return parseMaterial(undefined, { KHR_materials_sheen: extension });
+        };
+
+        it('imports the sheen color factor in gamma space', async function () {
+            const material = await parseExtension({ sheenColorFactor: [0.5, 0.25, 1] });
+
+            expect(material.useSheen).to.equal(true);
+            expect(material.sheen).to.deep.equal(new Color(0.5, 0.25, 1).gamma());
+        });
+
+        it('defaults the sheen color to black when the sheen color factor is omitted', async function () {
+            const material = await parseExtension({ sheenRoughnessFactor: 0.5 });
+
+            expect(material.useSheen).to.equal(true);
+            expect(material.sheen).to.deep.equal(new Color(0, 0, 0));
+        });
+
+        it('defaults the sheen color to black when only a sheen color texture is given', async function () {
+            const material = await parseExtension({ sheenColorTexture: { index: 0 } });
+
+            // the factor multiplies the texture, so the texture alone gives no sheen
+            expect(material.sheen).to.deep.equal(new Color(0, 0, 0));
+        });
+    });
+
+    describe('textures sharing an image', function () {
+
+        // glTF sampler values
+        const NEAREST = 9728;
+        const CLAMP_TO_EDGE = 33071;
+
+        /**
+         * Parses a glTF with a single image and the given samplers and textures. The image is
+         * supplied by the image processAsync option as a ready texture asset, so no image decoding
+         * is needed.
+         *
+         * @param {object[]} samplers - The glTF samplers.
+         * @param {object[]} textures - The glTF textures, all using image 0.
+         * @param {object} [textureOptions] - The texture options passed to the parser.
+         * @returns {Promise<{ result: object, imageAsset: Asset }>} The parse result and the asset
+         * of the image.
+         */
+        const parseTextures = (samplers, textures, textureOptions) => {
+            const gltf = {
+                asset: { version: '2.0' },
+                scenes: [],
+                nodes: [],
+                images: [{ uri: 'shared.png' }],
+                samplers,
+                textures
+            };
+            const data = new TextEncoder().encode(JSON.stringify(gltf));
+
+            const imageAsset = new Asset('shared', 'texture', { url: 'shared.png' });
+            imageAsset.resource = new Texture(app.graphicsDevice, { width: 4, height: 4 });
+            imageAsset.loaded = true;
+            app.assets.add(imageAsset);
+
+            const options = {
+                image: {
+                    processAsync: (gltfImage, callback) => callback(null, imageAsset)
+                },
+                texture: textureOptions
+            };
+
+            return new Promise((resolve, reject) => {
+                GlbParser.parse('textures.gltf', '', data, app.graphicsDevice, app.assets, options, [], (err, result) => {
+                    if (err) reject(err);
+                    else resolve({ result, imageAsset });
+                });
+            });
+        };
+
+        it('shares one texture between textures with the same sampling state', async function () {
+            const { result, imageAsset } = await parseTextures([{}, {}], [
+                { source: 0 },
+                { source: 0, sampler: 0 },
+                { source: 0, sampler: 1 }
+            ]);
+
+            // a missing sampler and empty samplers all resolve to the glTF defaults
+            expect(result.textures).to.have.lengthOf(3);
+            expect(result.textures[0]).to.equal(imageAsset);
+            expect(result.textures[1]).to.equal(imageAsset);
+            expect(result.textures[2]).to.equal(imageAsset);
+            expect(imageAsset.resource.addressU).to.equal(ADDRESS_REPEAT);
+            expect(imageAsset.resource.minFilter).to.equal(FILTER_LINEAR_MIPMAP_LINEAR);
+        });
+
+        it('clones the texture once for each further sampling state of an image', async function () {
+            const { result, imageAsset } = await parseTextures([
+                { wrapS: CLAMP_TO_EDGE },
+                { magFilter: NEAREST, minFilter: NEAREST },
+                { wrapS: CLAMP_TO_EDGE }
+            ], [
+                { source: 0 },
+                { source: 0, sampler: 0 },
+                { source: 0, sampler: 1 },
+                { source: 0, sampler: 2 }
+            ]);
+
+            const [defaultAsset, clampAsset, nearestAsset, clampAsset2] = result.textures;
+
+            // the first sampling state uses the image asset itself
+            expect(defaultAsset).to.equal(imageAsset);
+            expect(defaultAsset.resource.addressU).to.equal(ADDRESS_REPEAT);
+
+            // a different sampler with the same values shares the clone
+            expect(clampAsset).to.not.equal(imageAsset);
+            expect(clampAsset2).to.equal(clampAsset);
+            expect(clampAsset.resource).to.not.equal(imageAsset.resource);
+            expect(clampAsset.resource.addressU).to.equal(ADDRESS_CLAMP_TO_EDGE);
+            expect(clampAsset.resource.addressV).to.equal(ADDRESS_REPEAT);
+
+            expect(nearestAsset).to.not.equal(imageAsset);
+            expect(nearestAsset).to.not.equal(clampAsset);
+            expect(nearestAsset.resource.minFilter).to.equal(FILTER_NEAREST);
+            expect(nearestAsset.resource.magFilter).to.equal(FILTER_NEAREST);
+            expect(nearestAsset.resource.addressU).to.equal(ADDRESS_REPEAT);
+        });
+
+        it('calls the texture postprocess callback for every glTF texture', async function () {
+            const calls = [];
+            const { result } = await parseTextures([], [
+                { source: 0 },
+                { source: 0 }
+            ], {
+                postprocess: (gltfTexture, textureAsset) => calls.push([gltfTexture, textureAsset])
+            });
+
+            expect(calls).to.have.lengthOf(2);
+            expect(calls[0][0]).to.equal(result.gltf.textures[0]);
+            expect(calls[1][0]).to.equal(result.gltf.textures[1]);
+            expect(calls[0][1]).to.equal(result.textures[0]);
+            expect(calls[1][1]).to.equal(result.textures[0]);
+        });
     });
 
     describe('flat shading of primitives without normals', function () {

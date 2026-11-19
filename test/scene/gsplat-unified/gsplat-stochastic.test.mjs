@@ -37,6 +37,8 @@ describe('GSplat stochastic rendering', function () {
                 numSplatsBuffer: {}
             },
             device: {
+                // the WebGPU default, which every device supports
+                limits: { maxStorageBufferBindingSize: 134217728 },
                 submit: sinon.spy(),
                 getIndirectDrawSlot: sinon.stub().returns(0),
                 getIndirectDispatchSlot: sinon.stub().returns(0)
@@ -74,6 +76,19 @@ describe('GSplat stochastic rendering', function () {
         expect(render(renderer, true)).to.equal(renderer.projector.sortKeys);
         expect(renderer.gpuSorter).to.equal(null);
         expect(renderer.device.getIndirectDispatchSlot.calledWith(1)).to.equal(true);
+    });
+
+    it('dispatches and draws nothing once the projection cache exceeds the storage binding limit', function () {
+        const renderer = pipeline();
+        renderer.meshInstance = { visible: true };
+
+        // 1000 splats at 8 cache words each need 32000 bytes
+        renderer.device.limits.maxStorageBufferBindingSize = 31999;
+        expect(render(renderer, false)).to.equal(null);
+        expect(renderer.bindingLimitExceeded).to.equal(true);
+        expect(renderer.meshInstance.visible).to.equal(false);
+        expect(renderer._ensureGpuPipeline.called).to.equal(false);
+        expect(renderer.projector.dispatch.called).to.equal(false);
     });
 
     it('creates the sorter only when needed and retains it across mode changes', function () {
@@ -177,6 +192,46 @@ describe('GSplat stochastic rendering', function () {
             console.warn = originalWarn;
         }
         renderer._material.destroy();
+    });
+
+    it('applies coverage to the current projected survivors when contribution filtering changes', function () {
+        const renderer = pipeline();
+        renderer.projector.projCache = {};
+        const setSplatCoverage = sinon.spy();
+        const drawCommands = new Map([[null, { impl: { setSplatCoverage } }]]);
+        Object.assign(renderer, {
+            stochastic: false,
+            meshInstance: { drawCommands },
+            setStereo() {},
+            setHybridSortedRendering() {},
+            _material: new ShaderMaterial()
+        });
+        const cameraNode = { camera: { camera: { xrActive: false }, rect: { z: 1, w: 1 } } };
+        const params = {
+            cameraNode,
+            material: renderer.material,
+            varyings: { words: 0 },
+            foveationStrength: 0,
+            minContribution: 0
+        };
+        const view = () => {
+            renderer.prepareRenderView(
+                { hasBounds: false, workBuffer: { frustumCuller: {}, format: { getStream: () => null } } },
+                { totalActiveSplats: 4000000, totalIntervals: 1 }, params
+            );
+            return setSplatCoverage.lastCall.args;
+        };
+        expect(view()[0]).to.equal(true);
+        params.minContribution = 3;
+        const [enabled, order, cache, count] = view();
+        expect(enabled).to.equal(true);
+        expect(order).to.equal(renderer.gpuSorter.sortIndirect.lastCall.returnValue);
+        expect(cache).to.equal(renderer.projector.projCache);
+        expect(count).to.equal(renderer.intervalCompaction.numSplatsBuffer);
+        expect(renderer.projector.dispatch.lastCall.args[0].minContribution).to.equal(3);
+        params.foveationStrength = 1;
+        expect(view()[0]).to.equal(false);
+        renderer.material.destroy();
     });
 
     it('follows a mid-session dither mode change', function () {

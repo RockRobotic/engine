@@ -1,6 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
+import { GSplatBudgetBalancer } from '../../../src/scene/gsplat-unified/gsplat-budget-balancer.js';
+import { GSplatOctreeInstance } from '../../../src/scene/gsplat-unified/gsplat-octree-instance.js';
 import { GSplatOctree } from '../../../src/scene/gsplat-unified/gsplat-octree.js';
 
 function makeTree() {
@@ -45,92 +47,23 @@ function makeTree() {
     };
 }
 
-test('tree selector: far camera picks depth-1 nodes only', async () => {
-    const { selectTreeActiveNodes } = await import(
-        '../../../src/scene/gsplat-unified/gsplat-octree-instance.js'
-    );
-    const oct = new GSplatOctree('file:///scene.lcc2', makeTree());
+test('distance selection on an uneven legacy tree switches between coarse and finest nodes', () => {
+    const octree = new GSplatOctree('/scene/office.lcc2', makeTree());
+    octree.assetLoader = { getResource: () => ({}) };
+    for (let i = 0; i < octree.files.length; i++) octree.pollFileResource(i);
+    const instance = new GSplatOctreeInstance({ on() {} }, octree, { lodBaseDistance: 10, lodMultiplier: 2 });
+    instance.resolveLodRange();
+    const balancer = new GSplatBudgetBalancer();
+    const instances = new Map([[instance.placement, instance]]);
+    const draw = (x, y, z) => {
+        instance._cameraPos.set(x, y, z);
+        balancer.balance(instances, Infinity, true);
+        instance.applyLodChanges({});
+        return instance.nodeInfos.flatMap((info, i) => (info.currentLod < 0 ? [] : [octree.nodes[i].lods[info.currentLod].fileIndex])).sort();
+    };
 
-    const active = selectTreeActiveNodes(oct, {
-        cameraPos: { x: 0, y: 0, z: 1000 },
-        lodBaseDistance: 10,
-        lodMultiplier: 2,
-        fovScale: 1
-    });
-
-    const depths = active.map(i => oct.nodes[i].depth).sort();
-    assert.deepEqual(depths, [1, 1]);
-});
-
-test('tree selector: close camera picks deepest leaves', async () => {
-    const { selectTreeActiveNodes } = await import(
-        '../../../src/scene/gsplat-unified/gsplat-octree-instance.js'
-    );
-    const oct = new GSplatOctree('file:///scene.lcc2', makeTree());
-
-    const active = selectTreeActiveNodes(oct, {
-        cameraPos: { x: -50, y: -50, z: -50 },
-        lodBaseDistance: 10,
-        lodMultiplier: 2,
-        fovScale: 1
-    });
-
-    const depths = active.map(i => oct.nodes[i].depth).sort();
-    assert.deepEqual(depths, [1, 3]);
-});
-
-test('tree selector: root with null lod never enters active set', async () => {
-    const { selectTreeActiveNodes } = await import(
-        '../../../src/scene/gsplat-unified/gsplat-octree-instance.js'
-    );
-    const oct = new GSplatOctree('file:///scene.lcc2', makeTree());
-
-    const active = selectTreeActiveNodes(oct, {
-        cameraPos: { x: 0, y: 0, z: 1e9 },
-        lodBaseDistance: 10,
-        lodMultiplier: 2,
-        fovScale: 1
-    });
-
-    assert.ok(!active.includes(0), 'root (index 0) must not be active');
-});
-
-test('tree selector: hysteresis keeps the previously chosen depth within deadband', async () => {
-    const { selectTreeActiveNodes } = await import(
-        '../../../src/scene/gsplat-unified/gsplat-octree-instance.js'
-    );
-    const oct = new GSplatOctree('file:///scene.lcc2', makeTree());
-
-    const firstFrame = selectTreeActiveNodes(oct, {
-        cameraPos: { x: -50, y: -50, z: -50 },
-        lodBaseDistance: 10,
-        lodMultiplier: 2,
-        fovScale: 1
-    });
-    const prev = new Set(firstFrame);
-
-    const justBeyond = selectTreeActiveNodes(oct, {
-        cameraPos: { x: -55, y: -55, z: -55 },
-        lodBaseDistance: 10,
-        lodMultiplier: 2,
-        fovScale: 1,
-        previousActive: prev,
-        hysteresis: 0.15
-    });
-    assert.deepEqual(
-        justBeyond.map(i => oct.nodes[i].depth).sort(),
-        firstFrame.map(i => oct.nodes[i].depth).sort(),
-        'within 15% deadband, depth selection unchanged'
-    );
-
-    const past = selectTreeActiveNodes(oct, {
-        cameraPos: { x: 0, y: 0, z: 1000 },
-        lodBaseDistance: 10,
-        lodMultiplier: 2,
-        fovScale: 1,
-        previousActive: prev,
-        hysteresis: 0.15
-    });
-    const pastDepths = past.map(i => oct.nodes[i].depth);
-    assert.ok(pastDepths.every(d => d <= 1), 'past deadband, coarsened to depth <=1');
+    assert.deepEqual(draw(0, 0, 1000), [1, 2]);
+    assert.deepEqual(draw(-50, -50, -50), [2, 4]);
+    assert.deepEqual(draw(-55, -55, -55), [2, 4]);
+    assert.deepEqual(draw(0, 0, 1000), [1, 2]);
 });

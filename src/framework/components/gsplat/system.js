@@ -45,6 +45,7 @@ Debug.call(() => {
 // order matters here
 const _properties = [
     'unified',
+    'environmentVisible',
     'lodBaseDistance',
     'lodMultiplier',
     'lodRangeMin',
@@ -274,6 +275,18 @@ class GSplatComponentSystem extends ComponentSystem {
     getGSplatMaterial(camera, layer) {
         Debug.deprecated('GSplatComponentSystem#getGSplatMaterial is deprecated. Use GSplatComponentSystem#getMaterial instead.');
         return this.getMaterial(camera, layer);
+    }
+
+    /**
+     * Gets the renderer currently drawing unified splats for this camera and layer, including
+     * a per-camera fallback to CPU sorting when the WebGPU storage limit is exceeded.
+     *
+     * @param {Camera} camera - The camera instance.
+     * @param {Layer} layer - The splat layer.
+     * @returns {number|null} The active GSplat renderer mode, or null if there is no forward renderer.
+     */
+    getActiveRenderer(camera, layer) {
+        return this.app.renderer.gsplatDirector?.camerasMap.get(camera)?.layersMap.get(layer)?.gsplatManager?.activeRenderer ?? null;
     }
 
     destroy() {

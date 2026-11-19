@@ -48,6 +48,9 @@ import { createInstancing } from './glb/extensions/ext-mesh-gpu-instancing.js';
 import { createDracoMesh } from './glb/extensions/khr-draco-mesh-compression.js';
 import { createLights } from './glb/extensions/khr-lights-punctual.js';
 import { createVariants, registerMeshVariants } from './glb/extensions/khr-materials-variants.js';
+import {
+    decodeMeshoptBufferView, getMeshoptCompression, skipMeshoptFallbackBuffer
+} from './glb/extensions/meshopt-compression.js';
 import { getTextureSource } from './glb/extensions/texture-source.js';
 import { glbMaterialExtensions } from './glb/extensions/index.js';
 import { extractTextureTransform } from './glb/extensions/khr-texture-transform.js';
@@ -1321,7 +1324,8 @@ const createResources = async (device, gltf, bufferViews, textures, options, app
     return result;
 };
 
-const applySampler = (texture, gltfSampler) => {
+// resolve a glTF sampler to texture sampling state, using the glTF defaults for omitted values
+const getSamplerState = (gltfSampler) => {
     const getFilter = (filter, defaultValue) => {
         switch (filter) {
             case 9728: return FILTER_NEAREST;
@@ -1343,12 +1347,20 @@ const applySampler = (texture, gltfSampler) => {
         }
     };
 
+    return {
+        minFilter: getFilter(gltfSampler?.minFilter, FILTER_LINEAR_MIPMAP_LINEAR),
+        magFilter: getFilter(gltfSampler?.magFilter, FILTER_LINEAR),
+        addressU: getWrap(gltfSampler?.wrapS, ADDRESS_REPEAT),
+        addressV: getWrap(gltfSampler?.wrapT, ADDRESS_REPEAT)
+    };
+};
+
+const applySampler = (texture, samplerState) => {
     if (texture) {
-        gltfSampler = gltfSampler ?? { };
-        texture.minFilter = getFilter(gltfSampler.minFilter, FILTER_LINEAR_MIPMAP_LINEAR);
-        texture.magFilter = getFilter(gltfSampler.magFilter, FILTER_LINEAR);
-        texture.addressU = getWrap(gltfSampler.wrapS, ADDRESS_REPEAT);
-        texture.addressV = getWrap(gltfSampler.wrapT, ADDRESS_REPEAT);
+        texture.minFilter = samplerState.minFilter;
+        texture.magFilter = samplerState.magFilter;
+        texture.addressU = samplerState.addressU;
+        texture.addressV = samplerState.addressV;
     }
 };
 
@@ -1519,7 +1531,11 @@ const createTextures = (gltf, images, options) => {
     const processAsync = options?.texture?.processAsync;
     const postprocess = options?.texture?.postprocess;
 
-    const seenImages = new Set();
+    // sampling state is stored on the texture, so an image used with several sampling states
+    // needs a texture (and GPU memory) for each of them. glTF textures which use the same image
+    // with the same sampling state share one texture asset instead. maps an image index to a
+    // Map of sampling state key to the promise of its texture asset.
+    const imageTextures = new Map();
 
     return gltf.textures.map((gltfTexture) => {
         if (preprocess) {
@@ -1549,14 +1565,30 @@ const createTextures = (gltf, images, options) => {
             gltfImageIndex = gltfImageIndex ??
                 getTextureSource(gltfTexture);
 
-            const cloneAsset = seenImages.has(gltfImageIndex);
-            seenImages.add(gltfImageIndex);
+            // key on the resolved state rather than the sampler index, as different samplers
+            // (or none) can resolve to the same state
+            const samplerState = getSamplerState(gltf.samplers?.[gltfTexture.sampler]);
+            const samplerKey = `${samplerState.minFilter}-${samplerState.magFilter}-${samplerState.addressU}-${samplerState.addressV}`;
 
-            return images[gltfImageIndex].then((imageAsset) => {
-                const asset = cloneAsset ? cloneTextureAsset(imageAsset) : imageAsset;
-                applySampler(asset.resource, (gltf.samplers ?? [])[gltfTexture.sampler]);
-                return asset;
-            });
+            let textures = imageTextures.get(gltfImageIndex);
+            if (!textures) {
+                textures = new Map();
+                imageTextures.set(gltfImageIndex, textures);
+            }
+
+            let texturePromise = textures.get(samplerKey);
+            if (!texturePromise) {
+                // the first sampling state of an image uses the image asset itself
+                const cloneAsset = textures.size > 0;
+                texturePromise = images[gltfImageIndex].then((imageAsset) => {
+                    const asset = cloneAsset ? cloneTextureAsset(imageAsset) : imageAsset;
+                    applySampler(asset.resource, samplerState);
+                    return asset;
+                });
+                textures.set(samplerKey, texturePromise);
+            }
+
+            return texturePromise;
         });
 
         if (postprocess) {
@@ -1606,6 +1638,9 @@ const loadBuffers = (gltf, binaryChunk, urlBase, options) => {
         promise = promise.then((arrayBuffer) => {
             if (arrayBuffer) {
                 return arrayBuffer;
+            } else if (skipMeshoptFallbackBuffer(gltfBuffer, i)) {
+                // the buffer views using it are decoded from compressed data instead
+                return null;
             } else if (gltfBuffer.hasOwnProperty('uri')) {
                 if (isDataURI(gltfBuffer.uri)) {
                     // convert base64 to raw binary data held in a string
@@ -1801,8 +1836,19 @@ const createBufferViews = (gltf, buffers, options) => {
                 return buffer;
             }
 
+            const decoded = decodeMeshoptBufferView(gltfBufferView, buffers);
+            if (decoded) {
+                return decoded;
+            }
+
             // convert buffer to typed array
             return buffers[gltfBufferView.buffer].then((buffer) => {
+                if (!buffer) {
+                    const reason = getMeshoptCompression(gltfBufferView) ?
+                        'is meshopt compressed, call meshoptInitialize to load it' :
+                        `references buffer ${gltfBufferView.buffer}, which has no data`;
+                    throw new Error(`glTF buffer view ${i} ${reason}`);
+                }
                 return new Uint8Array(buffer.buffer,
                     buffer.byteOffset + (gltfBufferView.byteOffset || 0),
                     gltfBufferView.byteLength);

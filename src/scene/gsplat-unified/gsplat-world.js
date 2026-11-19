@@ -6,11 +6,12 @@ import { BoundingBox } from '../../core/shape/bounding-box.js';
 import { BlockAllocator } from '../../core/block-allocator.js';
 import { GSplatInfo } from './gsplat-info.js';
 import { GSplatWorkBuffer } from './gsplat-work-buffer.js';
-import { GSplatOctreeInstance, fitTreeInstancesToBudget } from './gsplat-octree-instance.js';
+import { GSplatOctreeInstance } from './gsplat-octree-instance.js';
 import { GSplatOctreeResource } from './gsplat-octree.resource.js';
 import { GSplatWorldState } from './gsplat-world-state.js';
 import { GSplatPlacementStateTracker } from './gsplat-placement-state-tracker.js';
 import { GSplatBudgetBalancer } from './gsplat-budget-balancer.js';
+import { LOD_DEBUG_COLORS } from './gsplat-lod-colors.js';
 import { GSPLAT_BUDGET_LIMIT, GSPLAT_DEBUG_LOD, GSPLAT_DEBUG_SH_UPDATE, PROJECTION_ORTHOGRAPHIC } from '../constants.js';
 
 /**
@@ -31,25 +32,12 @@ const _meshInstanceAabb = new BoundingBox();
 const _tempPlacementAabb = new BoundingBox();
 const _cameraDeltas = { translationDelta: 0, refreshAll: false };
 const tempUniqueOctrees = new Set();
-const tempTreeInstances = [];
-const tempFlatInstances = new Map();
 const _queuedSplats = new Set();
 const _updatedSplats = [];
 const _splatsWithSH = [];
 const _changedColorAllocIds = new Set();
 const tempNonOctreePlacements = new Set();
 const tempOctreePlacements = new Set();
-
-const _lodColorsRaw = [
-    [1, 0, 0],  // red
-    [0, 1, 0],  // green
-    [0, 0, 1],  // blue
-    [1, 1, 0],  // yellow
-    [1, 0, 1],  // magenta
-    [0, 1, 1],  // cyan
-    [1, 0.5, 0],  // orange
-    [0.5, 0, 1]   // purple
-];
 
 let _randomColorRaw = null;
 
@@ -95,6 +83,9 @@ class GSplatWorld {
      * @type {number}
      */
     _currentVersion = 0;
+
+    // A first sort across a placement or configuration change must take effect immediately.
+    _lastStructuralVersion = 0;
 
     /** @type {boolean} */
     _worldStateDirty = false;
@@ -213,6 +204,7 @@ class GSplatWorld {
             for (const splat of worldState.splats) {
                 splat.resource.decRefCount();
             }
+            worldState.releaseFiles(0);
             worldState.destroy();
         }
         this._worldStates.clear();
@@ -477,6 +469,9 @@ class GSplatWorld {
                 this._layerPlacementsDirty = true;
                 this._placementSetChanged = true;
                 this._octreeInstancesToDestroy.push(inst);
+            } else if (inst.octree.environmentUrl && inst.updateEnvironment()) {
+                this._layerPlacementsDirty = true;
+                this._placementSetChanged = true;
             }
         }
 
@@ -610,17 +605,16 @@ class GSplatWorld {
      */
     _updateWorldState(requireCenters) {
 
-        // Check for state changes (format version, modifier hash, numSplats)
-        let stateChanged = this._stateTracker.hasChanges(this._layerPlacements);
+        // Check for state changes (format version, modifier hash, numSplats, anti-aliasing flag)
+        this._stateTracker.antiAliasChanged = false;
+        let changes = this._stateTracker.getChanges(this._layerPlacements);
         for (const [, inst] of this._octreeInstances) {
-            if (this._stateTracker.hasChanges(inst.activePlacements)) {
-                stateChanged = true;
-            }
+            changes |= this._stateTracker.getChanges(inst.activePlacements);
         }
 
         // Recreate world state if there are changes
-        const placementsChanged = this._layerPlacementsDirty;
-        const worldChanged = placementsChanged || stateChanged || this._worldStates.size === 0 || this._worldStateDirty;
+        const previous = this.getState(this._lastWorldStateVersion);
+        const worldChanged = this._layerPlacementsDirty || changes || !previous || this._worldStateDirty;
         if (!worldChanged) {
             return false;
         }
@@ -661,6 +655,14 @@ class GSplatWorld {
             this._device, this._lastWorldStateVersion, splats,
             this._allocator, this._allocationMap
         );
+
+        // An LOD swap can add a child file after the dirty-flag poll or temporarily remove the
+        // last child of a parent. Compare the actual groups in the two snapshots to distinguish
+        // that churn from an added or removed scene placement.
+        if (!previous || !newState.hasSamePlacementGroups(previous) || (changes & GSplatPlacementStateTracker.MODIFIED) ||
+            this._worldStateDirty || this._gsplat.dirty) {
+            this._lastStructuralVersion = newState.version;
+        }
 
         // increment ref count for all resources in new state
         for (const splat of newState.splats) {
@@ -705,8 +707,9 @@ class GSplatWorld {
         }
 
         // When placements are added/removed, boundsBaseIndex values shift.
-        // Force a full rebuild so no stale indices remain.
-        if (this._placementSetChanged) {
+        // Force a full rebuild so no stale indices remain. A changed anti-aliasing flag is stored
+        // per splat in the work buffer, so it needs every splat copied again too.
+        if (this._placementSetChanged || this._stateTracker.antiAliasChanged) {
             newState.fullRebuild = true;
         }
 
@@ -758,34 +761,18 @@ class GSplatWorld {
     }
 
     /**
-     * Applies a completed CPU sort: advances the render-ready version (via markSorted) and uploads
-     * the sorted order texture. The manager rebinds the renderer afterwards.
+     * Whether the current work-buffer layout can remain on screen while the order for this
+     * version is uploaded. Only camera re-sorts and streamed LOD changes can wait. A skipped
+     * placement change still has to take effect on the next sort that supersedes it.
      *
-     * @param {number} version - The sorted version.
-     * @param {number} count - The sorted splat count.
-     * @param {Uint32Array} orderData - The sorted order data.
-     * @param {GraphNode} camera - The primary camera (for color bake on first sort).
-     * @param {boolean} updateBounds - Whether to upload frustum-culling bounds (false for CPU sort).
-     * @param {{ rebuilt: boolean, count: number, textureSize: number, deferred?: boolean }} result - Caller-owned
-     * result. `deferred` is set when the order is being uploaded over several frames:
-     * the caller must keep `orderData` alive and drive {@link GSplatWorkBuffer#stepOrderUpload}.
-     * @returns {{ rebuilt: boolean, count: number, textureSize: number, deferred?: boolean }} The
-     * populated result.
+     * @param {number} version - The sorted world version.
+     * @returns {boolean} Whether it is safe to stage the order before baking this version.
      */
-    onSorted(version, count, orderData, camera, updateBounds, result) {
-        this.markSorted(version, count, camera, updateBounds, result);
-        result.deferred = false;
-        if (this._worldStates.get(version)) {
-            // Update the order texture. A re-sort of the state already on screen can be uploaded
-            // over several frames; the first sort of a new state rebuilt the work buffer just
-            // above and its order has to arrive with it.
-            if (!result.rebuilt && this._workBuffer.beginOrderUpload(orderData)) {
-                result.deferred = true;
-            } else {
-                this._workBuffer.setOrderData(orderData);
-            }
-        }
-        return result;
+    canStageOrder(version) {
+        const state = this.getState(version);
+        return !!state && !!this.currentState?.sortedBefore && !this._workBufferRebuildRequired &&
+            this._currentVersion >= this._lastStructuralVersion &&
+            (version === this._currentVersion || (this.hasOctreeInstances && state.totalActiveSplats > 0));
     }
 
     /**
@@ -798,7 +785,7 @@ class GSplatWorld {
      * @param {boolean} updateBounds - Whether to upload frustum-culling bounds (false for CPU sort).
      * @param {{ rebuilt: boolean, count: number, textureSize: number, sortNeeded: boolean }} result
      * Caller-owned result. When `rebuilt` is true the manager must call `renderer.update(count,
-     * textureSize)`, `renderer.setOrderData()` and `intervalCompaction.invalidateUpload()`. When
+     * textureSize)` and `intervalCompaction.invalidateUpload()`. When
      * `sortNeeded` is true (a splat moved during the incremental update) the manager must re-sort.
      * @returns {{ rebuilt: boolean, count: number, textureSize: number, sortNeeded: boolean }} The populated result.
      */
@@ -889,15 +876,7 @@ class GSplatWorld {
         // update camera tracking for color updates
         this.updateColorCameraTracking(camera);
 
-        // apply pending file-release requests
-        if (worldState.pendingReleases && worldState.pendingReleases.length) {
-            const cooldownTicks = this._gsplat.cooldownTicks;
-            for (const [octree, fileIndex] of worldState.pendingReleases) {
-                // decrement once for each staged release; refcount system guards against premature unload
-                octree.decRefCount(fileIndex, cooldownTicks);
-            }
-            worldState.pendingReleases.length = 0;
-        }
+        worldState.releaseFiles(this._gsplat.cooldownTicks);
     }
 
     /**
@@ -950,6 +929,8 @@ class GSplatWorld {
                 for (const splat of oldState.splats) {
                     splat.resource.decRefCount();
                 }
+                // A state skipped by the sorter never had a first bake to release its files.
+                oldState.releaseFiles(this._gsplat.cooldownTicks);
                 this._worldStates.delete(v);
                 oldState.destroy();
             }
@@ -1135,7 +1116,7 @@ class GSplatWorld {
             const r = Math.random();
             const g = Math.random();
             const b = Math.random();
-            for (let i = 0; i < _lodColorsRaw.length; i++) {
+            for (let i = 0; i < LOD_DEBUG_COLORS.length; i++) {
                 _randomColorRaw[i] ??= [0, 0, 0];
                 _randomColorRaw[i][0] = r;
                 _randomColorRaw[i][1] = g;
@@ -1143,7 +1124,7 @@ class GSplatWorld {
             }
             return _randomColorRaw;
         } else if (debug === GSPLAT_DEBUG_LOD) {
-            return _lodColorsRaw;
+            return LOD_DEBUG_COLORS;
         }
         return undefined;
     }
@@ -1213,11 +1194,11 @@ class GSplatWorld {
         // Remaining budget for octrees after accounting for fixed splats.
         const octreeBudget = Math.max(1, budget - fixedSplats);
 
-        // Phase 1: resolve each instance's LOD range and evaluate per-node distances, and collect
-        // padding for active placements
+        // Phase 1: resolve each instance's LOD range and prepare its camera terms - the cut measures
+        // only the nodes it reaches - and collect padding for active placements
         for (const [, inst] of this._octreeInstances) {
             inst.resolveLodRange();
-            inst.evaluateNodeDistances(camera, this._gsplat);
+            inst.prepareDistances(camera, this._gsplat);
             for (const placement of inst.activePlacements) {
                 const resource = /** @type {GSplatResourceBase} */ (placement.resource);
                 const numSplats = resource?.numSplats ?? 0;
@@ -1228,36 +1209,8 @@ class GSplatWorld {
         // Adjust budget for estimated padding overhead
         const adjustedBudget = Math.max(1, octreeBudget - paddingEstimate);
 
-        // Phase 2: choose a LOD level per node within that budget
-        const limit = this._gsplat.splatBudgetMode === GSPLAT_BUDGET_LIMIT;
-        let flatInstances = this._octreeInstances;
-        let flatBudget = adjustedBudget;
-
-        // Tree-mode (LCC2) octrees render one node per root-to-leaf path, which the per-node
-        // allocator cannot express, so they are fitted separately. They get what is left of the
-        // budget once every flat octree is at its coarsest, and the allocator then fits the flat
-        // octrees to whatever the trees did not use.
-        for (const [, inst] of this._octreeInstances) {
-            if (inst.octree.hierarchyMode === 'tree') {
-                tempTreeInstances.push(inst);
-            }
-        }
-        if (tempTreeInstances.length > 0) {
-            let flatCoarsest = 0;
-            for (const [placement, inst] of this._octreeInstances) {
-                if (inst.octree.hierarchyMode !== 'tree') {
-                    tempFlatInstances.set(placement, inst);
-                    flatCoarsest += inst.lodTable.totalCoarsestCount;
-                }
-            }
-            const treeSplats = fitTreeInstancesToBudget(tempTreeInstances, Math.max(1, adjustedBudget - flatCoarsest), limit);
-            flatInstances = tempFlatInstances;
-            flatBudget = Math.max(1, adjustedBudget - treeSplats);
-        }
-
-        this._budgetBalancer.balance(flatInstances, flatBudget, limit);
-        tempTreeInstances.length = 0;
-        tempFlatInstances.clear();
+        // Phase 2: choose the cut through the trees within that budget
+        this._budgetBalancer.balance(this._octreeInstances, adjustedBudget, this._gsplat.splatBudgetMode === GSPLAT_BUDGET_LIMIT);
 
         // Phase 3: apply LOD changes
         for (const [, inst] of this._octreeInstances) {

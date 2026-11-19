@@ -4,6 +4,10 @@ export default /* glsl */`
 #endif
 #include "gsplatCommonVS"
 
+#ifdef GSPLAT_COVERAGE_CLASSIFY
+    #include "gsplatCoverageClassifyPS"
+#else
+
 varying mediump vec2 gaussianUV;
 flat varying mediump vec4 gaussianColor;
 
@@ -35,6 +39,13 @@ void main(void) {
     }
 
     vec3 modelCenter = getCenter();
+    #if defined(GSPLAT_COVERAGE_ALPHA_CAP) && defined(GSPLAT_SEPARATE_OPACITY) && !GSPLAT_AA && defined(FORWARD_PASS) && !defined(PICK_PASS) && !defined(SHADOW_PASS) && !defined(PREPASS_PASS)
+        // The active material guarantees its color modifier never increases opacity.
+        if (getOpacity() <= alphaClipForward) {
+            gl_Position = discardVec;
+            return;
+        }
+    #endif
 
     SplatCenter center;
     center.modelCenterOriginal = modelCenter;
@@ -98,6 +109,12 @@ void main(void) {
 
     clipCorner(corner, clr.w);
 
+    // over-unity opacity (see gsplatHelpersVS): above 1, the alpha passed to the fragment shader is
+    // 1 + the core radius instead, drawn with peak alpha 1
+    if (clr.w > 1.0) {
+        clr.w = 1.0 + gsplatPlateauCore(clr.w);
+    }
+
     // write output
     #if GSPLAT_2DGS
         // 2DGS: Project world corner directly
@@ -112,7 +129,7 @@ void main(void) {
         // Overdraw visualization mode: color by elevation
         float t = clamp(modelCenter.y / 20.0, 0.0, 1.0);
         vec3 rampColor = textureLod(colorRamp, vec2(t, 0.5), 0.0).rgb;
-        clr.a *= (1.0 / 32.0) * colorRampIntensity;
+        clr.a = min(clr.a, 1.0) * (1.0 / 32.0) * colorRampIntensity;
         gaussianColor = vec4(rampColor, clr.a);
     #else
         gaussianColor = vec4(prepareOutputFromGamma(max(clr.xyz, 0.0), -center.view.z), clr.w);
@@ -130,4 +147,5 @@ void main(void) {
         vPickId = loadPcId().r;
     #endif
 }
+#endif
 `;

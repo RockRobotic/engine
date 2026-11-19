@@ -564,6 +564,35 @@ const readPly = async (reader, propertyFilter = null, progressFunc = null) => {
 // by default load everything
 const defaultElementFilter = val => true;
 
+/**
+ * Returns whether the header comments record that the splats were trained with anti-aliasing, in
+ * the form Postshot writes (`postshot.anti_aliasing=1`, omitted without anti-aliasing) or the one
+ * Brush and splat-transform write (`SplatRenderMode: mip`). As in those tools, matching is
+ * case-insensitive and the last matching comment wins.
+ *
+ * @param {string[]} comments - The header comments, without the leading `comment `.
+ * @returns {boolean} True if the splats were trained with anti-aliasing.
+ * @ignore
+ */
+const isAntiAliased = (comments) => {
+    let antiAliased = false;
+    for (const comment of comments) {
+        const lower = comment.toLowerCase().trim();
+        if (lower.startsWith('splatrendermode:')) {
+            const mode = lower.substring(16).trim();
+            if (mode === 'mip' || mode === 'default' || mode === '2dgs') {
+                antiAliased = mode === 'mip';
+            }
+        } else if (lower.startsWith('postshot.anti_aliasing=')) {
+            const value = lower.substring(23).trim();
+            if (value === '1' || value === '0') {
+                antiAliased = value === '1';
+            }
+        }
+    }
+    return antiAliased;
+};
+
 class PlyParser {
     /** @type {AppBase} */
     app;
@@ -589,19 +618,36 @@ class PlyParser {
      */
     async load(url, callback, asset) {
         const gsplatCentersEnabledAtLoad = this.app.scene?.gsplatCentersEnabled !== false;
+        const controller = new AbortController();
+        const contents = asset.file?.contents;
+        let reader;
+        const cancel = () => {
+            if (!controller.signal.aborted) {
+                controller.abort();
+                // A caller-supplied response is independent of our fetch signal.
+                if (contents && reader) reader.cancel().catch(() => {});
+            }
+        };
+        const onUnload = asset.once('unload', cancel);
+        const onRemove = asset.once('remove', cancel);
 
         try {
             // either use the fetch request passed in by the application or initiate it ourselves.
             // credentials: 'include' lets CloudFront signed cookies authorize cross-origin fetches.
-            const response = await (asset.file?.contents ?? fetch(url.load, { credentials: 'include' }));
+            const response = await (contents ?? fetch(url.load, { credentials: 'include', signal: controller.signal }));
+            if (controller.signal.aborted) {
+                callback(null, null);
+                return;
+            }
             if (!response || !response.body) {
                 callback('Error loading resource', null);
             } else {
                 const totalLength = parseInt(response.headers.get('content-length') ?? '0', 10);
                 let totalReceived = 0;
 
+                reader = response.body.getReader();
                 const data = await readPly(
-                    response.body.getReader(),
+                    reader,
                     asset.data.elementFilter ?? defaultElementFilter,
                     (bytes) => {
                         totalReceived += bytes;
@@ -611,8 +657,18 @@ class PlyParser {
                     }
                 );
 
+                const device = this.app.graphicsDevice;
+                if (controller.signal.aborted || !device || device._destroyed) {
+                    callback(null, null);
+                    return;
+                }
+
                 // allow application to process the data
                 asset.fire('load:data', data);
+                if (controller.signal.aborted) {
+                    callback(null, null);
+                    return;
+                }
 
                 // reorder data
                 if (!data.isCompressed) {
@@ -626,11 +682,16 @@ class PlyParser {
                 const resource = (data.isCompressed && !asset.data.decompress) ?
                     new GSplatCompressedResource(this.app.graphicsDevice, data, { prepareCenters }) :
                     new GSplatResource(this.app.graphicsDevice, data.isCompressed ? data.decompress() : data, { prepareCenters });
+                resource.antiAlias = isAntiAliased(data.comments);
 
                 callback(null, resource);
             }
         } catch (err) {
-            callback(err, null);
+            // A withdrawn request yields no resource and can be retried if the URL is needed again.
+            callback(controller.signal.aborted ? null : err, null);
+        } finally {
+            onUnload.off();
+            onRemove.off();
         }
     }
 
@@ -644,4 +705,4 @@ class PlyParser {
     }
 }
 
-export { PlyParser };
+export { PlyParser, isAntiAliased };

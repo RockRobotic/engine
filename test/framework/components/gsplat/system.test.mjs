@@ -7,7 +7,7 @@ import { CameraComponentSystem } from '../../../../src/framework/components/came
 import { GSplatComponentSystem } from '../../../../src/framework/components/gsplat/system.js';
 import { Entity } from '../../../../src/framework/entity.js';
 import { LayerComposition } from '../../../../src/scene/composition/layer-composition.js';
-import { LAYERID_WORLD } from '../../../../src/scene/constants.js';
+import { GSPLAT_RENDERER_RASTER_CPU_SORT, GSPLAT_RENDERER_RASTER_GPU_SORT, LAYERID_WORLD } from '../../../../src/scene/constants.js';
 import { GSplatParams } from '../../../../src/scene/gsplat-unified/gsplat-params.js';
 import { createGraphicsDevice } from '../../../device.mjs';
 import { jsdomSetup, jsdomTeardown } from '../../../jsdom.mjs';
@@ -105,6 +105,21 @@ describe('GSplatComponentSystem', function () {
             });
             return manager;
         };
+
+        it('reports the active forward renderer for each camera and layer after fallback', function () {
+            const first = createCamera();
+            const second = createCamera();
+            const layer = app.scene.layers.getLayerById(LAYERID_WORLD);
+            const system = app.systems.gsplat;
+            expect(system.getActiveRenderer(first.camera.camera, layer)).to.equal(null);
+            const manager = addManager(first);
+            manager.activeRenderer = GSPLAT_RENDERER_RASTER_GPU_SORT;
+            addManager(second).activeRenderer = GSPLAT_RENDERER_RASTER_GPU_SORT;
+            expect(system.getActiveRenderer(first.camera.camera, layer)).to.equal(GSPLAT_RENDERER_RASTER_GPU_SORT);
+            manager.activeRenderer = GSPLAT_RENDERER_RASTER_CPU_SORT;
+            expect(system.getActiveRenderer(first.camera.camera, layer)).to.equal(GSPLAT_RENDERER_RASTER_CPU_SORT);
+            expect(system.getActiveRenderer(second.camera.camera, layer)).to.equal(GSPLAT_RENDERER_RASTER_GPU_SORT);
+        });
 
         it('streams the managers of a camera', function () {
             const manager = addManager(createCamera());

@@ -11,6 +11,31 @@ const _toAllocateIds = [];
 const _toAllocate = [];
 const _toFree = [];
 
+// Work-buffer slots can have holes after streaming or incremental defragmentation.
+// Keep a snapshot for this geometry version, since the allocator can advance while
+// a previous order is still bound. A small gap is cheaper to shade than another draw.
+/**
+ * @param {Iterable<MemBlock>} blocks - Active allocator blocks for this version.
+ * @param {number} width - Side length of the work buffer.
+ * @returns {number[]} Pairs of inclusive start and exclusive end rows.
+ * @ignore
+ */
+function getCoverageRows(blocks, width) {
+    const ranges = Array.from(blocks, block => [
+        Math.floor(block.offset / width), Math.ceil((block.offset + block.size) / width)
+    ]).sort((a, b) => a[0] - b[0]);
+    const rows = [];
+    for (const [first, end] of ranges) {
+        const last = rows.length - 1;
+        if (last >= 0 && first <= rows[last] + 8) {
+            rows[last] = Math.max(rows[last], end);
+        } else {
+            rows.push(first, end);
+        }
+    }
+    return rows;
+}
+
 class GSplatWorldState {
     /**
      * The version of the world state.
@@ -38,6 +63,9 @@ class GSplatWorldState {
      * The texture size of work buffer.
      */
     textureSize = 0;
+
+    /** @type {number[]|null} */
+    coverageRows = null;
 
     /**
      * Total number of active splats across all placements.
@@ -125,7 +153,35 @@ class GSplatWorldState {
         this.computeAllocationDiff(splats, allocationMap);
         const { fullRebuild, changedAllocIds } = this.applyAllocations(device, allocator, allocationMap);
         this.assignSplatOffsets(splats, allocationMap, fullRebuild, changedAllocIds);
+        if (device.isWebGL2 && device.supportsSplatCoverage && this.totalActiveSplats >= 4000000) {
+            this.coverageRows = getCoverageRows(allocationMap.values(), this.textureSize);
+        }
         this.buildBoundsGroups(splats);
+    }
+
+    /**
+     * @param {GSplatWorldState} other - The previous world state.
+     * @returns {boolean} Whether the same placement groups occupy the two layouts.
+     */
+    hasSamePlacementGroups(other) {
+        const groups = this.boundsGroups;
+        if (groups.length !== other.boundsGroups.length) return false;
+        for (let i = 0; i < groups.length; i++) {
+            if (groups[i].splat.parentPlacementId !== other.boundsGroups[i].splat.parentPlacementId) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Applies file decrements once the old layout is no longer needed for rendering.
+     *
+     * @param {number} cooldownTicks - Ticks to keep unreferenced files before unloading.
+     */
+    releaseFiles(cooldownTicks) {
+        for (const [octree, fileIndex] of this.pendingReleases) {
+            octree.decRefCount(fileIndex, cooldownTicks);
+        }
+        this.pendingReleases.length = 0;
     }
 
     destroy() {
@@ -357,4 +413,4 @@ class GSplatWorldState {
     }
 }
 
-export { GSplatWorldState };
+export { GSplatWorldState, getCoverageRows };

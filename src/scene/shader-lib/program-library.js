@@ -130,6 +130,11 @@ class ProgramLibrary {
 
             // fire an event to allow the shader to be modified by the user. Note that any modifications are applied
             // to all materials using the same generated shader, as the cache key is not modified.
+            if (this._device.hasEvent('shader:generate')) {
+                // The listener can edit source or include maps on this cached definition. Future
+                // processing variants must still use ordinary quads after a one-shot listener.
+                generatedShaderDef.customGeneration = true;
+            }
             this._device.fire('shader:generate', {
                 userMaterialId,
                 shaderPassInfo,
@@ -139,6 +144,8 @@ class ProgramLibrary {
             // create a shader definition for the shader that will include the processingOptions
             const shaderDefinition = {
                 name: `${generatedShaderDef.name}${passName}-proc`,
+                splatCoverage: !generatedShaderDef.customGeneration && options.shaderDesc?.uniqueName === 'UnifiedSplatMaterial' &&
+                    options.defines?.has('GSPLAT_GL_COVERAGE'),
                 attributes: generatedShaderDef.attributes,
                 vshader: generatedShaderDef.vshader,
                 vincludes: generatedShaderDef.vincludes,

@@ -146,6 +146,9 @@ class CacheEntry {
 class WebgpuRenderPipeline extends WebgpuPipeline {
     lookupHashes = new Uint32Array(20);
 
+    // The second fragment entry point uses the same shader module and fixed-function blending.
+    coverageDescriptors = new WeakMap();
+
     // a float view of the lookup hashes, to store the float values by their bits
     lookupHashesFloat = new Float32Array(this.lookupHashes.buffer);
 
@@ -486,6 +489,9 @@ class WebgpuRenderPipeline extends WebgpuPipeline {
         DebugHelper.setLabel(desc, `RenderPipelineDescr-${_pipelineId}`);
 
         const pipeline = wgpu.createRenderPipeline(desc);
+        if (webgpuShader.fragmentCode?.includes('fn splatCoverageMain(')) {
+            this.coverageDescriptors.set(pipeline, desc);
+        }
 
         DebugHelper.setLabel(pipeline, `RenderPipeline-${_pipelineId}`);
         Debug.trace(TRACEID_RENDERPIPELINE_ALLOC, `Alloc: Id ${_pipelineId}, stack: ${DebugGraphics.toString()}`, desc);

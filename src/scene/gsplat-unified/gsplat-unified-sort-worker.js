@@ -1,16 +1,22 @@
-function UnifiedSortWorker() {
-
-    const myself = (typeof self !== 'undefined' && self) || (require('node:worker_threads').parentPort);
+// `myself` is the worker's message port: `self` in a web worker, or the parentPort of a Node
+// worker_threads worker. The creator passes it in as source text, so that bundlers never see the
+// Node-only require.
+function UnifiedSortWorker(myself) {
 
     // cache of centers for each splat id
     const centersMap = new Map();
     let centersData;
     let distances;
     let countBuffer;
-    let indexMap;
 
     // Sorting mode: false = forward vector (directional), true = radial distance (for cubemaps)
     let _radialSort = false;
+
+    // The camera's near clip, which log spaced sort keys start inside of
+    let _nearClip = 0;
+
+    // Whether a directional sort's keys are log spaced: a perspective, non-fisheye camera
+    let _logDepthKeys = false;
 
     // Flag to warn only once about sortKey overflow
     let _warnedSortKeyOverflow = false;
@@ -46,7 +52,6 @@ function UnifiedSortWorker() {
     };
 
     // Sort key evaluation iterates only active splats (padding is excluded).
-    // The indexMap (built on intervals) provides the work-buffer pixel mapping.
     const evaluateSortKeysCommon = (sortParams, minDist, range, distances, countBuffer, centersData, processSplatFn) => {
         const { ids, intervals } = centersData;
 
@@ -116,11 +121,51 @@ function UnifiedSortWorker() {
             });
     };
 
-    const evaluateSortKeysRadial = (sortParams, minDist, range, distances, countBuffer, centersData) => {
-        evaluateSortKeysCommon(sortParams, minDist, range, distances, countBuffer, centersData,
-            (centers, params, intervalStart, intervalEnd, compactIdx, invBinRange, minDist, range, distances, countBuffer) => {
+    // Same as logSortKeys for signed depths, whose negative values (the splats behind the camera)
+    // take the last `behindKeys` keys, spaced the same way out to `behindValue`, so they sort after
+    // the rest in the order of their signed depth. A loop of its own, as the sign test slows the
+    // radial keys' loop down. The sign picks each key's scale, clamp and direction arithmetically:
+    // a branch on it runs at half the speed, and slower still when splats in front of the camera
+    // and behind it are interleaved.
+    const signedLogSortKeys = (nearValue, farValue, behindValue, behindKeys, maxKey, distances, countBuffer) => {
+        const minBits = binWeightsUtil.floatBits(nearValue);
+        const bitsRange = binWeightsUtil.floatBits(farValue) - minBits;
+        const behindBitsRange = binWeightsUtil.floatBits(behindValue) - minBits;
+
+        // the nearest key in front of the camera, and the last behind it, counted from the first
+        const nearestKey = maxKey - behindKeys;
+        const lastBehindKey = behindKeys - 1;
+        const keyScale = bitsRange > 0 ? nearestKey / bitsRange : 0;
+        const behindKeyScale = behindBitsRange > 0 ? lastBehindKey / behindBitsRange : 0;
+        const behindScaleStep = behindKeyScale - keyScale;
+        const behindLimitStep = lastBehindKey - nearestKey;
+
+        // read as int32, so the sign bit is never a float
+        const keys = new Int32Array(distances.buffer, distances.byteOffset, distances.length);
+        for (let i = 0; i < keys.length; i++) {
+            const bits = keys[i];
+
+            // 1 behind the camera, 0 in front; the bits of the magnitude are measured from the near
+            // value's, and a key behind counts up from the one after the nearest, in front down
+            const behind = bits >>> 31;
+            const keyFromNear = ((bits & 0x7fffffff) - minBits) * (keyScale + behind * behindScaleStep);
+            const limit = nearestKey + behind * behindLimitStep;
+            const key = keyFromNear <= 0 ? 0 : (keyFromNear >= limit ? limit : keyFromNear >>> 0);
+            const sortKey = nearestKey + behind + (2 * behind - 1) * key;
+            keys[i] = sortKey;
+            countBuffer[sortKey]++;
+        }
+    };
+
+    // Radial keys from the squared distance, whose bits follow log2 as well.
+    const evaluateSortKeysRadial = (sortParams, nearDist, maxDist, distances, countBuffer, centersData) => {
+        const squaredDistances = new Float32Array(distances.buffer, 0, distances.length);
+
+        evaluateSortKeysCommon(sortParams, 0, maxDist, distances, countBuffer, centersData,
+            (centers, params, intervalStart, intervalEnd, compactIdx) => {
                 // camera related params
                 const { transformedPosition, scale } = params;
+                const scaleSq = scale * scale;
 
                 // camera position in local space
                 const cx = transformedPosition.x;
@@ -133,23 +178,41 @@ function UnifiedSortWorker() {
                     const dy = centers[srcIndex + 1] - cy;
                     const dz = centers[srcIndex + 2] - cz;
 
-                    const distSq = dx * dx + dy * dy + dz * dz;
-                    // World-space radial distance from camera
-                    const dist = Math.sqrt(distSq) * scale;
-
-                    // Invert distance so far objects get small keys (rendered first, back-to-front)
-                    const invertedDist = range - dist;
-                    // Bin-based mapping
-                    const d = invertedDist * invBinRange;
-                    const bin = d >>> 0;
-                    const sortKey = (binBase[bin] + binDivider[bin] * (d - bin)) >>> 0;
-
-                    distances[compactIdx++] = sortKey;
-                    countBuffer[sortKey]++;
+                    // World-space squared distance from camera
+                    squaredDistances[compactIdx++] = (dx * dx + dy * dy + dz * dz) * scaleSq;
                 }
 
                 return compactIdx;
             });
+
+        binWeightsUtil.logSortKeys(nearDist * nearDist, maxDist * maxDist, distances, countBuffer);
+    };
+
+    // Depth keys of a perspective camera, from the signed depth in front of it. The sort direction
+    // is the camera's +Z, which points backwards, so the range runs from -minDist in front of the
+    // camera to maxDist behind it. Splats closer than `nearDist` on either side share a key. A shader
+    // can move splats from behind the camera into view (the sort reads the centers before any
+    // modifier), so those keep their order too, in a sixteenth of the keys.
+    const evaluateSortKeysDepth = (sortParams, nearDist, minDist, maxDist, maxKey, distances, countBuffer, centersData) => {
+        const depths = new Float32Array(distances.buffer, 0, distances.length);
+
+        evaluateSortKeysCommon(sortParams, minDist, -minDist, distances, countBuffer, centersData,
+            (centers, params, intervalStart, intervalEnd, compactIdx) => {
+                // camera related params
+                const { transformedDirection, offset, scale } = params;
+                const sdx = transformedDirection.x * scale;
+                const sdy = transformedDirection.y * scale;
+                const sdz = transformedDirection.z * scale;
+
+                // Process each center in this interval
+                for (let srcIndex = intervalStart; srcIndex < intervalEnd; srcIndex += 3) {
+                    depths[compactIdx++] = -(centers[srcIndex] * sdx + centers[srcIndex + 1] * sdy + centers[srcIndex + 2] * sdz + offset);
+                }
+
+                return compactIdx;
+            });
+
+        signedLogSortKeys(nearDist, -minDist, maxDist, (maxKey + 1) >>> 4, maxKey, distances, countBuffer);
     };
 
     const countingSort = (bucketCount, countBuffer, numVertices, distances, order) => {
@@ -167,11 +230,21 @@ function UnifiedSortWorker() {
             console.warn(`[SortWorker] ${numVertices - validCount} splats lost due to sortKey overflow. Check resource AABB bounds contain all the splats.`);
         }
 
-        // build output array — map through indexMap to get work-buffer pixel indices
-        for (let i = 0; i < numVertices; i++) {
-            const distance = distances[i];
-            const destIndex = --countBuffer[distance];
-            order[destIndex] = indexMap[i];
+        // Every allocation is consecutive in the work buffer. Advance its pixel index in
+        // lockstep with the compact keys, preserving the original scatter order for tied keys.
+        const { ids, intervals, pixelOffsets } = centersData;
+        let compactIndex = 0;
+        for (let placement = 0; placement < ids.length; placement++) {
+            const ranges = intervals[placement].length ? intervals[placement] : [0, centersMap.get(ids[placement]).length / 3];
+            const offsets = pixelOffsets[placement];
+            for (let i = 0; i < ranges.length; i += 2) {
+                let pixel = offsets[i / 2];
+                const end = compactIndex + (ranges[i + 1] - ranges[i]);
+                while (compactIndex < end) {
+                    const distance = distances[compactIndex++];
+                    order[--countBuffer[distance]] = pixel++;
+                }
+            }
         }
     };
 
@@ -263,10 +336,15 @@ function UnifiedSortWorker() {
 
         const numVertices = centersData.totalActiveSplats;
 
-        // calculate number of bits needed to store sorting result
-        const compareBits = Math.max(10, Math.min(20, Math.round(Math.log2(numVertices / 4))));
-
-        const bucketCount = 2 ** compareBits + 1;
+        // Radial keys, and the depth keys of a perspective camera, are log spaced (an orthographic
+        // or fisheye camera can draw splats at or behind it, so its depth keys keep the bins). They
+        // take 16 bits whatever the splat count: they are spread over every doubling of distance
+        // from inside the near clip out to the scene, and 16 bits give each doubling a few thousand
+        // keys, where fewer leave the splats of a small scene far from the camera sharing keys.
+        // More would spread the counting sort over a count table too big for the cache
+        const logKeys = _radialSort || _logDepthKeys;
+        // eslint-disable-next-line no-undef
+        const bucketCount = GSplatSortBinWeights.bucketCount(numVertices, logKeys);
 
         // create distance buffer
         if (distances?.length !== numVertices) {
@@ -279,19 +357,27 @@ function UnifiedSortWorker() {
             countBuffer.fill(0);
         }
 
-        const range = maxDist - minDist;
-
-        // Set up camera-relative bin weighting for near-camera precision (using shared utility)
+        // Log keys start ten doublings inside the near clip: the splats closer than it are drawn
+        // too, with their depth clamped, so they need an order. An orthographic near clip can be
+        // zero or negative, so a share of the range stands in for it then (radial only).
         // eslint-disable-next-line no-undef
-        const cameraBin = GSplatSortBinWeights.computeCameraBin(_radialSort, minDist, range);
-
-        // Compute bin weights locally using shared utility
-        const binWeights = binWeightsUtil.compute(cameraBin, bucketCount);
-        unpackBinWeights(binWeights);
+        const nearDist = GSplatSortBinWeights.logNearDistance(_nearClip, maxDist);
 
         if (_radialSort) {
-            evaluateSortKeysRadial(sortParams, minDist, range, distances, countBuffer, centersData);
+            evaluateSortKeysRadial(sortParams, nearDist, maxDist, distances, countBuffer, centersData);
+        } else if (logKeys) {
+            evaluateSortKeysDepth(sortParams, nearDist, minDist, maxDist, bucketCount - 1, distances, countBuffer, centersData);
         } else {
+            const range = maxDist - minDist;
+
+            // Set up camera-relative bin weighting for near-camera precision (using shared utility)
+            // eslint-disable-next-line no-undef
+            const cameraBin = GSplatSortBinWeights.computeCameraBin(minDist, range);
+
+            // Compute bin weights locally using shared utility
+            const binWeights = binWeightsUtil.compute(cameraBin, bucketCount);
+            unpackBinWeights(binWeights);
+
             evaluateSortKeysLinear(sortParams, minDist, range, distances, countBuffer, centersData);
         }
 
@@ -310,35 +396,6 @@ function UnifiedSortWorker() {
         };
 
         myself.postMessage(response, transferList);
-    };
-
-    /**
-     * Builds the indexMap that maps compact splat index to work-buffer pixel index.
-     * Called once when the intervals message arrives (world state change), not per-sort.
-     *
-     * @param {object} data - The intervals message data containing layout metadata.
-     */
-    const buildIndexMap = (data) => {
-        const { ids, pixelOffsets, intervals, totalActiveSplats } = data;
-
-        if (!indexMap || indexMap.length < totalActiveSplats) {
-            indexMap = new Uint32Array(totalActiveSplats);
-        }
-
-        let compactIdx = 0;
-        for (let paramIdx = 0; paramIdx < ids.length; paramIdx++) {
-            const centers = centersMap.get(ids[paramIdx]);
-            const offsets = pixelOffsets[paramIdx];
-            const intervalsArray = intervals[paramIdx].length > 0 ? intervals[paramIdx] : [0, centers.length / 3];
-
-            for (let i = 0; i < intervalsArray.length; i += 2) {
-                let workBufferIndex = offsets[i / 2];
-                const count = intervalsArray[i + 1] - intervalsArray[i];
-                for (let j = 0; j < count; j++) {
-                    indexMap[compactIdx++] = workBufferIndex++;
-                }
-            }
-        }
     };
 
     myself.addEventListener('message', (message) => {
@@ -361,6 +418,8 @@ function UnifiedSortWorker() {
             // sort
             case 'sort': {
                 _radialSort = msgData.radialSorting || false;
+                _nearClip = msgData.nearClip;
+                _logDepthKeys = msgData.logDepthKeys || false;
                 const order = new Uint32Array(msgData.order);
                 sort(msgData.sortParams, order, centersData);
                 break;
@@ -369,7 +428,6 @@ function UnifiedSortWorker() {
             // intervals
             case 'intervals': {
                 centersData = msgData;
-                buildIndexMap(centersData);
                 break;
             }
         }

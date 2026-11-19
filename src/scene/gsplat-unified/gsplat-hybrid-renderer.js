@@ -186,6 +186,14 @@ class GSplatHybridRenderer extends GSplatRenderer {
     lastCompactedNumIntervals = 0;
 
     /**
+     * Set once the active splats need a projection cache too large to bind on this device. From
+     * then on this renderer dispatches nothing, and the manager falls back to the CPU-sort renderer.
+     *
+     * @type {boolean}
+     */
+    bindingLimitExceeded = false;
+
+    /**
      * @param {GraphicsDevice} device - The graphics device.
      * @param {GraphNode} node - The graph node.
      * @param {GraphNode} cameraNode - The camera node.
@@ -211,6 +219,7 @@ class GSplatHybridRenderer extends GSplatRenderer {
 
         this._material.setDefine('{GSPLAT_INSTANCE_SIZE}', GSplatResourceBase.instanceSize);
         this._material.setDefine('{CACHE_STRIDE}', CACHE_STRIDE);
+        this._material.setDefine('GSPLAT_COVERAGE_PASS', true);
 
         this.configureMaterial();
 
@@ -412,6 +421,21 @@ class GSplatHybridRenderer extends GSplatRenderer {
             /** @type {StorageBuffer} */ (this.projector.projCache),
             /** @type {StorageBuffer} */ (this.intervalCompaction.numSplatsBuffer)
         );
+        // Contribution filtering happens before projection results are compacted. Coverage
+        // reads the surviving count, order and cached quads from this same frame.
+        const uniformContribution = params.minContribution >= 0 && params.foveationStrength === 0;
+        const chunks = params.material.shaderChunks.wgsl;
+        // The world-space modifier runs in the projector, before the exact cached axes and
+        // colors are written. A custom raster shader can change the footprint or blending.
+        const defaultRaster = chunks.size === 0 || (chunks.size === 1 && chunks.has('gsplatModifyVS'));
+        const useCoverage = uniformContribution && worldState.totalActiveSplats >= 4000000 &&
+            !sceneCam.xrActive && !this.stochastic && !this.fisheyeProj.enabled &&
+            !params.varyings.words && defaultRaster &&
+            !this._material.getDefine('GSPLAT_OVERDRAW');
+        const commands = this.meshInstance.drawCommands.get(null);
+        commands.impl.setSplatCoverage(useCoverage, sortedIndices, this.projector.projCache,
+            this.intervalCompaction.numSplatsBuffer, this.projector.sortKeys, GSplatResourceBase.instanceSize);
+
         return true;
     }
 
@@ -463,6 +487,21 @@ class GSplatHybridRenderer extends GSplatRenderer {
         const elementCount = worldState.totalActiveSplats;
         if (elementCount === 0) return null;
 
+        // The projection cache holds an entry per active splat and is bound whole, so it has to fit
+        // a single storage buffer binding. Past that every bind group using it is invalid and
+        // nothing renders, so dispatch nothing and let the manager fall back to CPU sorting. The
+        // draw is hidden as well, as its storage buffers are never assigned on this path.
+        const cacheBytes = elementCount * (CACHE_STRIDE + params.varyings.words) * 4;
+        const maxBindingSize = this.device.limits.maxStorageBufferBindingSize;
+        if (cacheBytes > maxBindingSize) {
+            if (!this.bindingLimitExceeded) {
+                this.bindingLimitExceeded = true;
+                Debug.warn(`GSplatHybridRenderer: ${elementCount} active splats need a ${cacheBytes} byte projection cache, over the device's maxStorageBufferBindingSize of ${maxBindingSize} bytes. Falling back to CPU sorting.`);
+            }
+            this.meshInstance.visible = false;
+            return null;
+        }
+
         // Depth / opacity picking still needs sorting and the pre-sort submission below, even
         // when the work buffer has no per-splat IDs for the projector's PICK_MODE shader variant.
         const pickMode = isPicking && !!world.workBuffer.format.getStream('pcId');
@@ -495,7 +534,10 @@ class GSplatHybridRenderer extends GSplatRenderer {
         let minDist = 0;
         let maxDist = 1;
         if (!stochastic) {
-            const numBits = Math.max(10, Math.min(20, Math.round(Math.log2(elementCount / 4))));
+            // at least 16 bits whatever the splat count: log spaced keys (see GSplatProjector) are
+            // spread over every doubling of distance from inside the near clip out to the scene,
+            // and fewer leave the splats of a small scene far from the camera sharing keys
+            const numBits = Math.max(16, Math.min(20, Math.round(Math.log2(elementCount / 4))));
             roundedNumBits = Math.ceil(numBits / gpuSorter.radixBits) * gpuSorter.radixBits;
             ({ minDist, maxDist } = this.computeDistanceRange(worldState, cameraNode, params.radialSorting));
         }
@@ -512,15 +554,17 @@ class GSplatHybridRenderer extends GSplatRenderer {
             minDist,
             maxDist,
             alphaClip,
-            minPixelSize: params.minPixelSize * 0.5,
+            minPixelSize: params.minPixelSize,
             minContribution: params.minContribution,
             foveationStrength: params.foveationStrength,
             foveationCenter: params.foveationCenter,
+            antiAliasFilterSize: params.antiAliasFilterSize,
             viewportWidth,
             viewportHeight,
             pickMode,
             fisheyeProj,
             antiAlias: params.antiAlias,
+            antiAliasMixed: params.antiAliasMixed,
             isStereo,
             material: params.material,
             userCacheWords: params.varyings.words
@@ -559,7 +603,7 @@ class GSplatHybridRenderer extends GSplatRenderer {
             this.indirectDispatchSlot + 1,
             /** @type {StorageBuffer} */ (ic.sortElementCountBuffer),
             undefined,
-            false,
+            true, // the rasterizer reads only sorted indices
             true  // destructiveKeys: projector overwrites sortKeys each frame before the sort
         );
     }

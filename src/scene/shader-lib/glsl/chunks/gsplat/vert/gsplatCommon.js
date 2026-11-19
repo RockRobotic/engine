@@ -7,7 +7,9 @@ export default /* glsl */`
 #include "gsplatEvalSHVS"
 #include "gsplatQuatToMat3VS"
 #include "gsplatReadVS"
-#include "gsplatSourceVS"
+#ifndef GSPLAT_COVERAGE_CLASSIFY
+    #include "gsplatSourceVS"
+#endif
 #include "gsplatCenterVS"
 #include "gsplatCornerVS"
 #include "gsplatOutputVS"
@@ -25,7 +27,12 @@ void clipCorner(inout SplatCorner corner, float alpha) {
     #else
         float alphaClipValue = alphaClipForward;
     #endif
-    float clip = min(1.0, sqrt(max(0.0, log(alpha / alphaClipValue))) * 0.5);
+    float clip = min(1.0, sqrt(max(0.0, log(min(alpha, 1.0) / alphaClipValue))) * 0.5);
+    if (alpha > 1.0) {
+        // over-unity opacity: the plain trim at peak 1, stretched past the opaque core (see gsplatHelpersVS)
+        float core = gsplatPlateauCore(alpha);
+        clip = core + (1.0 - core) * clip;
+    }
     corner.offset *= clip;
     corner.uv *= clip;
 }

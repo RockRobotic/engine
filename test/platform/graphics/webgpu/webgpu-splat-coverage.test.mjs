@@ -1,0 +1,58 @@
+import { expect } from 'chai';
+import sinon from 'sinon';
+
+import { WebgpuShaderProcessorWGSL } from '../../../../src/platform/graphics/webgpu/webgpu-shader-processor-wgsl.js';
+import { WebgpuSplatCoverage } from '../../../../src/platform/graphics/webgpu/webgpu-splat-coverage.js';
+
+describe('WebGPU splat coverage', function () {
+    it('initializes interpolated inputs for both native color entry points', function () {
+        const code = [
+            '@fragment fn fragmentMain(color: FragmentInput) -> FragmentOutput { return shade(); }',
+            '@fragment fn splatCoverageMain(bounds: FragmentInput) -> CoverageOutput { return shadeBounds(); }'
+        ].join('\n');
+        const result = WebgpuShaderProcessorWGSL.copyInputs(code, {});
+        expect(result).to.include('_pcCopyInputs(color);');
+        expect(result).to.include('_pcCopyInputs(bounds);');
+    });
+
+    it('reads the instance index in each vertex entry point', function () {
+        const code = [
+            '@vertex fn vertexMain(quad: VertexInput) -> VertexOutput { return vertex(); }',
+            '@vertex fn alternateMain(other: VertexInput) -> VertexOutput { return vertex(); }'
+        ].join('\n');
+        const result = WebgpuShaderProcessorWGSL.copyInputs(code, {}, [
+            { pcName: 'pcInstanceIndex', wgslName: 'instanceIndex' }
+        ]);
+        expect(result).to.include('_pcCopyInputs(quad);\n    pcInstanceIndex = quad.instanceIndex;');
+        expect(result).to.include('_pcCopyInputs(other);\n    pcInstanceIndex = other.instanceIndex;');
+    });
+
+    it('leaves other render passes and custom mesh layouts on the regular draw path', function () {
+        const device = { splatCoveragePass: false, depthState: { write: false }, _coverageBindings: [] };
+        const coverage = new WebgpuSplatCoverage(device);
+        coverage.instanceSize = 128;
+        expect(coverage.draw(null, 768)).to.equal(false);
+        device.splatCoveragePass = true;
+        expect(coverage.draw(null, 768)).to.equal(false);
+        device._coverageBindings[2] = { owner: { storageBuffers: [] } };
+        expect(coverage.draw(null, 768)).to.equal(false);
+    });
+
+    it('releases all owned resources without releasing world, projector or sorter inputs', function () {
+        const device = { deferDestroy: sinon.spy(), _vram: { sb: 32, ub: 16, tex: 256 } };
+        const coverage = new WebgpuSplatCoverage(device);
+        const inputs = Array.from({ length: 4 }, () => ({}));
+        coverage.setInputs(...inputs, 128);
+        const owned = [{}, {}, {}];
+        coverage.owned.push(...owned);
+        coverage.resources = { capacity: 4 };
+        coverage.storageBytes = 32;
+        coverage.uniformBytes = 16;
+        coverage.textureBytes = 256;
+        coverage.destroy();
+        coverage.destroy();
+        expect(device.deferDestroy.getCalls().map(call => call.args[0])).to.deep.equal(owned);
+        expect(coverage.resources).to.equal(null);
+        expect(device._vram).to.deep.equal({ sb: 0, ub: 0, tex: 0 });
+    });
+});

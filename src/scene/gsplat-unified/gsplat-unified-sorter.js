@@ -4,6 +4,7 @@ import { UnifiedSortWorker } from './gsplat-unified-sort-worker.js';
 import { GSplatSortBinWeights } from './gsplat-sort-bin-weights.js';
 
 /**
+ * @import { Vec3 } from '../../core/math/vec3.js'
  * @import { GSplatInfo } from './gsplat-info.js'
  * @import { Scene } from '../scene.js'
  */
@@ -25,12 +26,32 @@ class GSplatUnifiedSorter extends EventHandler {
     hasNewVersion = false;
 
     /**
+     * Latest camera request for the current layout while a worker sort is running.
+     *
+     * @type {{ params: object[], radialSorting: boolean, nearClip: number, logDepthKeys: boolean, radialPosition: Vec3|null } | null}
+     * @private
+     */
+    _deferredCamera = null;
+
+    // Worker results arrive in dispatch order, including jobs queued by layout changes.
+    /** @type {(Vec3|null)[]} */
+    _sentPositions = [];
+
+    /**
      * Pending sorted result to be applied next frame. If multiple sorted results are received from
      * the worker, the latest result is stored here.
      *
-     * @type {{ count: number, version: number, orderData: Uint32Array }|null}
+     * @type {{ count: number, version: number, orderData: Uint32Array, radialPosition: Vec3|null }|null}
      */
     pendingSorted = null;
+
+    /**
+     * The most recently applied sorted result. Its order data is kept out of the reuse pool, so it
+     * can be applied again after a device restore, which loses the GPU copy of the order.
+     *
+     * @type {{ count: number, version: number, orderData: Uint32Array, radialPosition: Vec3|null }|null}
+     */
+    lastSorted = null;
 
     /** @type {Set<number>} */
     centersSet = new Set();
@@ -52,9 +73,10 @@ class GSplatUnifiedSorter extends EventHandler {
         this.scene = scene ?? null;
 
         // Build worker source with GSplatSortBinWeights class injected via stringification.
+        const workerPort = platform.environment === 'node' ? 'require("node:worker_threads").parentPort' : 'self';
         const workerSource = `
             const GSplatSortBinWeights = ${GSplatSortBinWeights.toString()};
-            (${UnifiedSortWorker.toString()})()
+            (${UnifiedSortWorker.toString()})(${workerPort})
         `;
 
         if (platform.environment === 'node') {
@@ -88,8 +110,9 @@ class GSplatUnifiedSorter extends EventHandler {
         // decrement jobs in flight counter
         this.jobsInFlight--;
 
-        // if there's already a pending result, return its orderData to the pool
-        if (this.pendingSorted) {
+        // if there's already a pending result, return its orderData to the pool, unless it is the
+        // re-queued last result, which still owns it
+        if (this.pendingSorted && this.pendingSorted !== this.lastSorted) {
             this.releaseOrderData(this.pendingSorted.orderData);
         }
 
@@ -97,21 +120,49 @@ class GSplatUnifiedSorter extends EventHandler {
         this.pendingSorted = {
             count: msgData.count,
             version: msgData.version,
-            orderData: orderData
+            orderData: orderData,
+            radialPosition: this._sentPositions.shift() ?? null
         };
+
+        // The camera may have come to rest while the worker was busy. Dispatch its latest
+        // exact pose here; render-on-demand might never report another camera movement.
+        if (this.jobsInFlight === 0 && this._deferredCamera) {
+            const { params, radialSorting, nearClip, logDepthKeys, radialPosition } = this._deferredCamera;
+            this.setSortParams(params, radialSorting, nearClip, logDepthKeys, radialPosition);
+        }
     }
 
-    applyPendingSorted() {
-        if (this.pendingSorted) {
-            const { count, version, orderData } = this.pendingSorted;
+    /**
+     * @param {boolean} [cacheForRestore] - Keep the order for a device restore. Streaming worlds
+     * reload their source resources on restore and can return the order to the pool sooner.
+     */
+    applyPendingSorted(cacheForRestore = true) {
+        const pending = this.pendingSorted;
+        if (pending) {
             this.pendingSorted = null;
             this._orderDataRetained = false;
-            this.fire('sorted', count, version, orderData);
+            this.fire('sorted', pending.count, pending.version, pending.orderData, pending.radialPosition);
 
-            // reuse order data, unless the handler is still uploading from it
-            if (!this._orderDataRetained) {
-                this.releaseOrderData(orderData);
+            const previous = this.lastSorted;
+            this.lastSorted = cacheForRestore ? pending : null;
+            if (previous && previous !== pending) {
+                this.releaseOrderData(previous.orderData);
             }
+            if (!cacheForRestore && !this._orderDataRetained) {
+                this.releaseOrderData(pending.orderData);
+            }
+        }
+    }
+
+    /**
+     * Queues the most recently applied sorted result to be applied again on the next
+     * {@link applyPendingSorted}. Used after a device restore, which loses the GPU copy of the
+     * order, so the splats render without waiting for the worker to sort again. No-op when a newer
+     * result is already pending.
+     */
+    reapplyLastSorted() {
+        if (!this.pendingSorted && this.lastSorted) {
+            this.pendingSorted = this.lastSorted;
         }
     }
 
@@ -125,14 +176,17 @@ class GSplatUnifiedSorter extends EventHandler {
     }
 
     releaseOrderData(orderData) {
-        if (orderData.length === this.bufferLength) {
+        if (orderData !== this.lastSorted?.orderData && orderData.length === this.bufferLength) {
             this.availableOrderData.push(orderData);
         }
     }
 
     destroy() {
         this._destroyed = true;
+        this._sentPositions.length = 0;
+        this._deferredCamera = null;
         this.pendingSorted = null;
+        this.lastSorted = null;
         this.worker.terminate();
         this.worker = null;
     }
@@ -213,10 +267,12 @@ class GSplatUnifiedSorter extends EventHandler {
 
         // we have a new version to process
         this.hasNewVersion = true;
+        this._deferredCamera = null; // sortParams are ordered by the previous layout's placements
 
-        // output size matches input size, clear available data when it changes
-        const { textureSize } = payload;
-        const newLength = textureSize * textureSize;
+        // The sorted sequence is dense even when the source atlas contains free blocks.
+        // Pad only its last row so WebGL can upload the complete rectangle directly.
+        const { textureSize, totalActiveSplats = textureSize * textureSize } = payload;
+        const newLength = Math.ceil(totalActiveSplats / textureSize) * textureSize;
         if (newLength !== this.bufferLength) {
             this.bufferLength = newLength;
             this.availableOrderData.length = 0;
@@ -228,13 +284,19 @@ class GSplatUnifiedSorter extends EventHandler {
     /**
      * Sends sorting parameters to the sorter. Called every frame sorting is needed.
      *
-     * @param {object} params - The sorting parameters - per-splat directions, offsets, scales, AABBs.
+     * @param {object[]} params - The sorting parameters - per-splat directions, offsets, scales, AABBs.
      * @param {boolean} radialSorting - Whether to use radial distance sorting.
+     * @param {number} nearClip - The camera's near clip distance, which log spaced sort keys start
+     * inside of.
+     * @param {boolean} logDepthKeys - Whether a directional sort's keys are log spaced, which needs
+     * a perspective, non-fisheye camera (radial sort keys always are).
+     * @param {Vec3|null} [radialPosition] - World-space camera snapshot for a radial sort.
+     * @returns {boolean} True when the camera request has been sent or queued for the worker.
      */
-    setSortParams(params, radialSorting) {
+    setSortParams(params, radialSorting, nearClip, logDepthKeys, radialPosition = null) {
 
-        // only process job requests if we have a new version or no jobs are in flight
         if (this.hasNewVersion || this.jobsInFlight === 0) {
+            this._deferredCamera = null;
 
             // reuse or allocate new order data
             let orderData = this.availableOrderData.pop();
@@ -244,6 +306,7 @@ class GSplatUnifiedSorter extends EventHandler {
 
             // worker management
             this.jobsInFlight++;
+            this._sentPositions.push(radialPosition);
             this.hasNewVersion = false;
 
             // send job to worker
@@ -251,11 +314,16 @@ class GSplatUnifiedSorter extends EventHandler {
                 command: 'sort',
                 sortParams: params,
                 radialSorting: radialSorting,
+                nearClip: nearClip,
+                logDepthKeys: logDepthKeys,
                 order: orderData.buffer
             }, [
                 orderData.buffer
             ]);
+        } else {
+            this._deferredCamera = { params, radialSorting, nearClip, logDepthKeys, radialPosition };
         }
+        return true;
     }
 }
 

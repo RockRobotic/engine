@@ -6,6 +6,9 @@ import { SHADERLANGUAGE_GLSL, SHADERLANGUAGE_WGSL } from './constants.js';
 import { DebugGraphics } from './debug-graphics.js';
 import { ShaderDefinitionUtils } from './shader-definition-utils.js';
 import halfTypes from './shader-chunks/frag/half-types.js';
+import dispatchThreadsCS from './shader-chunks/compute/dispatch-threads.js';
+import sceneColorCS from './shader-chunks/compute/scene-color.js';
+import sceneDepthCS from './shader-chunks/compute/scene-depth.js';
 
 /**
  * @import { BindGroupFormat } from './bind-group-format.js'
@@ -27,6 +30,19 @@ let id = 0;
  * @category Graphics
  */
 class Shader {
+    /** @ignore */
+    splatClassifierSource = null;
+
+    /**
+     * The definition of a compute shader as supplied, before its source is pre-processed, or null
+     * for a vertex and fragment shader. Variants of the compute shader, compiled with additional
+     * defines, are created from it.
+     *
+     * @type {object|null}
+     * @ignore
+     */
+    computeDefinition = null;
+
     /**
      * Format of the uniform buffer for mesh bind group.
      *
@@ -115,6 +131,8 @@ class Shader {
      * varyings into a single buffer, or {@link TRANSFORM_FEEDBACK_SEPARATE} to store each varying
      * in its own buffer. This setting is only effective when useTransformFeedback property is enabled.
      * Defaults to {@link TRANSFORM_FEEDBACK_INTERLEAVED}.
+     * @param {boolean} [definition.splatCoverage] - The native unified splat material uses a
+     * verified WebGL coverage classifier.
      * @param {string} [definition.vshader] - Vertex shader source (GLSL code). Optional when
      * compute shader is specified.
      * @param {string} [definition.fshader] - Fragment shader source (GLSL code). Optional when
@@ -195,6 +213,10 @@ class Shader {
             Debug.assert(graphicsDevice.supportsCompute, 'Compute shaders are not supported on this device.');
             Debug.assert(!definition.vshader && !definition.fshader, 'Vertex and fragment shaders are not supported when creating a compute shader.');
 
+            // the definition as supplied, before its source is pre-processed, which variants
+            // compiled with additional defines are created from
+            this.computeDefinition = { ...definition };
+
             // keep reference to unmodified shader in debug mode
             Debug.call(() => {
                 this.cUnmodified = definition.cshader;
@@ -206,11 +228,20 @@ class Shader {
 
             const cshader = enablesCode + definesCode + definition.cshader;
 
-            // Add built-in halfTypesCS include for compute shaders (if not already provided by
-            // user). Note this copies the supplied map, which must not be modified.
+            // Add the built-in includes for compute shaders (if not already provided by user). Note
+            // this copies the supplied map, which must not be modified.
             const cincludes = new Map(definition.cincludes);
             if (!cincludes.has('halfTypesCS')) {
                 cincludes.set('halfTypesCS', halfTypes);
+            }
+            if (!cincludes.has('sceneDepthCS')) {
+                cincludes.set('sceneDepthCS', sceneDepthCS);
+            }
+            if (!cincludes.has('sceneColorCS')) {
+                cincludes.set('sceneColorCS', sceneColorCS);
+            }
+            if (!cincludes.has('dispatchThreadsCS')) {
+                cincludes.set('dispatchThreadsCS', dispatchThreadsCS);
             }
 
             // pre-process compute shader source
@@ -231,11 +262,22 @@ class Shader {
 
             const wgsl = definition.shaderLanguage === SHADERLANGUAGE_WGSL;
 
+            const vertexSource = definition.vshader;
+
             // pre-process vertex shader source
             definition.vshader = Preprocessor.run(definition.vshader, definition.vincludes, {
                 sourceName: `vertex shader for ${this.label}`,
                 stripDefines: wgsl
             });
+
+            // The WebGL coverage classifier shares the material's exact camera, format and
+            // modifier chunks while running once per source texel in a fragment stage.
+            if (graphicsDevice.isWebGL2 && definition.splatCoverage && definition.vshader?.includes('uniform uint splatCoverageStart;')) {
+                const classifier = vertexSource.replace('#version 300 es', '#version 300 es\n#define GSPLAT_COVERAGE_CLASSIFY');
+                this.splatClassifierSource = Preprocessor.run(classifier, definition.vincludes, {
+                    sourceName: `coverage classifier for ${this.label}`
+                });
+            }
 
             // if no attributes are specified, try to extract the default names after the shader has been pre-processed
             if (definition.shaderLanguage === SHADERLANGUAGE_GLSL) {

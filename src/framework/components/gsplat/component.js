@@ -6,6 +6,7 @@ import { AssetReference } from '../../asset/asset-reference.js';
 import { Component } from '../component.js';
 import { Debug } from '../../../core/debug.js';
 import { GSplatPlacement } from '../../../scene/gsplat-unified/gsplat-placement.js';
+import { GSplatOctreeResource } from '../../../scene/gsplat-unified/gsplat-octree.resource.js';
 import { PickerId } from '../../../scene/picker-id.js';
 
 /**
@@ -55,15 +56,16 @@ const UNIFIED_LEGACY_HINT = 'GSplatComponent#unified now defaults to true (unifi
  * - [Billions of Splats](https://playcanvas.github.io/#/gaussian-splatting/billions)
  * - [Downtown Streaming](https://playcanvas.github.io/#/gaussian-splatting/downtown)
  * - [Global Sorting](https://playcanvas.github.io/#/gaussian-splatting/global-sorting)
- * - [LOD Instances](https://playcanvas.github.io/#/gaussian-splatting/lod-instances)
- * - [LOD Streaming](https://playcanvas.github.io/#/gaussian-splatting/lod-streaming)
- * - [LOD Streaming with Spherical Harmonics](https://playcanvas.github.io/#/gaussian-splatting/lod-streaming-sh)
+ * - [LOD Instances](https://playcanvas.github.io/#/gaussian-splatting/streamed-instances)
  * - [Multi-Splat](https://playcanvas.github.io/#/gaussian-splatting/multi-splat)
  * - [Multi-View](https://playcanvas.github.io/#/gaussian-splatting/multi-view)
  * - [Picking](https://playcanvas.github.io/#/gaussian-splatting/picking)
- * - [Reveal Effect](https://playcanvas.github.io/#/gaussian-splatting/reveal)
- * - [Shader Effects](https://playcanvas.github.io/#/gaussian-splatting/shader-effects)
- * - [Spherical Harmonics](https://playcanvas.github.io/#/gaussian-splatting/spherical-harmonics)
+ * - [Reveal Effect](https://playcanvas.github.io/#/gaussian-splatting-fx/reveal)
+ * - [Shader Effects](https://playcanvas.github.io/#/gaussian-splatting-fx/shader-effects)
+ * - [Spherical Harmonics](https://playcanvas.github.io/#/gaussian-splatting/simple-sh)
+ * - [Streamed LCC2](https://playcanvas.github.io/#/gaussian-splatting/streamed-lcc2)
+ * - [Streamed SOG](https://playcanvas.github.io/#/gaussian-splatting/streamed-sog)
+ * - [Streamed SOG with Spherical Harmonics](https://playcanvas.github.io/#/gaussian-splatting/streamed-sog-sh)
  *
  * @hideconstructor
  * @category Graphics
@@ -104,6 +106,9 @@ class GSplatComponent extends Component {
      * @private
      */
     _lodBaseDistance = 5;
+
+    /** @private */
+    _environmentVisible = true;
 
     /**
      * Geometric multiplier between successive LOD transition distances.
@@ -280,7 +285,7 @@ class GSplatComponent extends Component {
             if (!mi.node) {
                 mi.node = this.entity;
             }
-            mi.castShadow = this._castShadows;
+            mi.castShadows = this._castShadows;
             mi.setCustomAabb(this._customAabb);
 
             if (this.enabled && this.entity.enabled) {
@@ -362,7 +367,7 @@ class GSplatComponent extends Component {
                     }
                 }
 
-                mi.castShadow = value;
+                mi.castShadows = value;
 
                 if (!this._castShadows && value) {
                     for (let i = 0; i < layers.length; i++) {
@@ -759,6 +764,39 @@ class GSplatComponent extends Component {
         return this._resource ?? this._assetReference.asset?.resource ?? null;
     }
 
+    /**
+     * Whether the loaded LOD manifest declares an environment splat asset. Available as soon as
+     * the manifest loads, even when the environment is hidden or its data is still downloading.
+     *
+     * @type {boolean}
+     */
+    get hasEnvironment() {
+        const resource = /** @type {GSplatResourceBase|GSplatOctreeResource|null} */ (this.resource);
+        return resource instanceof GSplatOctreeResource && !!resource.octree?.environmentUrl;
+    }
+
+    /**
+     * Sets whether the unified renderer streams and displays this component's environment splats.
+     * Defaults to true. Can be set before assigning the asset.
+     *
+     * @type {boolean}
+     */
+    set environmentVisible(value) {
+        this._environmentVisible = value;
+        if (this._placement) {
+            this._placement.environmentVisible = value;
+        }
+    }
+
+    /**
+     * Gets the requested visibility of this component's environment splats.
+     *
+     * @type {boolean}
+     */
+    get environmentVisible() {
+        return this._environmentVisible;
+    }
+
     /** @private */
     destroyInstance() {
 
@@ -1029,6 +1067,7 @@ class GSplatComponent extends Component {
 
             this._placement = new GSplatPlacement(resource, this.entity, 0, this._parameters, null, this._id);
             this._placement.lodBaseDistance = this._lodBaseDistance;
+            this._placement.environmentVisible = this._environmentVisible;
             this._placement.lodMultiplier = this._lodMultiplier;
             this._placement.lodRangeMin = this._lodRangeMin;
             this._placement.lodRangeMax = this._lodRangeMax;

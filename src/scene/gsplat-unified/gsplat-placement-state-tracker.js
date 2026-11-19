@@ -4,28 +4,42 @@
 
 /**
  * Tracks placement state changes for a GSplatManager.
- * Detects changes in format version, modifier hash, numSplats, and centersVersion.
+ * Detects changes in format version, modifier hash, numSplats, centersVersion and the anti-aliasing
+ * flag (stored per splat in the work buffer).
  *
  * @ignore
  */
 class GSplatPlacementStateTracker {
+    static ADDED = 1;
+
+    static MODIFIED = 2;
+
     /**
      * WeakMap of placement to last seen state.
      * Using WeakMap allows automatic cleanup when placements are garbage collected.
      *
-     * @type {WeakMap<GSplatPlacement, { formatVersion: number, modifierHash: number, numSplats: number, centersVersion: number }>}
+     * @type {WeakMap<GSplatPlacement, { formatVersion: number, modifierHash: number, numSplats: number, centersVersion: number, antiAlias: boolean }>}
      * @private
      */
     _states = new WeakMap();
 
     /**
+     * Set by {@link getChanges} when the anti-aliasing flag of an already tracked placement's
+     * resource changed. The flag is stored per splat in the work buffer, so every splat needs to be
+     * copied again (a full rebuild). Cleared by the caller.
+     *
+     * @type {boolean}
+     */
+    antiAliasChanged = false;
+
+    /**
      * Checks if any placements have changed state. Updates internal tracking.
      *
      * @param {Iterable<GSplatPlacement>} placements - Iterable of placements to check.
-     * @returns {boolean} True if any placement's state changed.
+     * @returns {number} Bitmask of ADDED (first seen) and MODIFIED (existing resource changed).
      */
-    hasChanges(placements) {
-        let changed = false;
+    getChanges(placements) {
+        let changes = 0;
 
         for (const p of placements) {
             if (!p.resource) continue;
@@ -34,26 +48,33 @@ class GSplatPlacementStateTracker {
             const modifierHash = p.workBufferModifier?.hash ?? 0;
             const numSplats = p.resource.numSplats ?? 0;
             const centersVersion = p.resource.centersVersion;
+            const antiAlias = p.resource.antiAlias;
 
             const state = this._states.get(p);
             if (!state) {
                 // First time seeing this placement
-                this._states.set(p, { formatVersion, modifierHash, numSplats, centersVersion });
-                changed = true;
+                this._states.set(p, { formatVersion, modifierHash, numSplats, centersVersion, antiAlias });
+                changes |= GSplatPlacementStateTracker.ADDED;
             } else if (state.formatVersion !== formatVersion ||
                        state.modifierHash !== modifierHash ||
                        state.numSplats !== numSplats ||
-                       state.centersVersion !== centersVersion) {
+                       state.centersVersion !== centersVersion ||
+                       state.antiAlias !== antiAlias) {
+                if (state.antiAlias !== antiAlias) {
+                    this.antiAliasChanged = true;
+                }
+
                 // Reuse existing object, just update values
                 state.formatVersion = formatVersion;
                 state.modifierHash = modifierHash;
                 state.numSplats = numSplats;
                 state.centersVersion = centersVersion;
-                changed = true;
+                state.antiAlias = antiAlias;
+                changes |= GSplatPlacementStateTracker.MODIFIED;
             }
         }
 
-        return changed;
+        return changes;
     }
 }
 

@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { GSplatOctree } from '../../../src/scene/gsplat-unified/gsplat-octree.js';
 import { GSplatOctreeResource } from '../../../src/scene/gsplat-unified/gsplat-octree.resource.js';
 
-test('GSplatOctree tree mode: retains every node and links parent/children', () => {
+test('GSplatOctree tree mode: retains splat nodes and their parent/child relationships', () => {
     const data = {
         hierarchyMode: 'tree',
         lodLevels: 1,
@@ -40,24 +40,19 @@ test('GSplatOctree tree mode: retains every node and links parent/children', () 
     const oct = new GSplatOctree('file:///scene.lcc2', data);
 
     assert.equal(oct.hierarchyMode, 'tree');
-    assert.equal(oct.nodes.length, 4, 'root + 3 descendants = 4 nodes');
-    assert.equal(oct.rootIndex, 0);
     assert.equal(oct.totalLevels, 2);
-
-    const root = oct.nodes[0];
-    assert.equal(root.depth, 0);
-    assert.equal(root.parent, -1);
-    assert.equal(root.children.length, 2);
-    assert.equal(root.lods[0].fileIndex, -1, 'root lod is null sentinel');
-
-    const firstChild = oct.nodes[root.children[0]];
-    assert.equal(firstChild.depth, 1);
-    assert.equal(firstChild.parent, 0);
-    assert.equal(firstChild.lods[0].fileIndex, 0);
-    assert.equal(firstChild.lods[0].count, 100);
+    assert.equal(oct.nodes.length, 3, 'only renderable nodes enter the cut');
+    assert.equal(oct.lodLevels, 2);
+    assert.deepEqual(Array.from(oct.parentIndex), [-1, -1, 0]);
+    assert.deepEqual(Array.from(oct.childCount), [1, 0, 0]);
+    assert.deepEqual(Array.from(oct.nodeLevel), [1, 1, 0]);
+    assert.equal(oct.nodes[0].lods[1].fileIndex, 0);
+    assert.equal(oct.nodes[0].lods[1].count, 100);
+    const resource = new GSplatOctreeResource('/scene/office.lcc2', data, null);
+    assert.equal(resource.numSplats, 350, 'includes the shallow leaf at level 1');
 });
 
-test('GSplatOctree flat mode: unchanged behaviour when hierarchyMode absent', () => {
+test('GSplatOctree converts leaf-only LoD manifests into a chain of levels', () => {
     const data = {
         lodLevels: 2,
         filenames: ['a.sog', 'b.sog'],
@@ -75,9 +70,8 @@ test('GSplatOctree flat mode: unchanged behaviour when hierarchyMode absent', ()
         }
     };
     const oct = new GSplatOctree('file:///scene.json', data);
-    assert.equal(oct.hierarchyMode ?? 'flat', 'flat');
-    assert.equal(oct.nodes.length, 1, 'only 1 leaf in flat mode');
-    assert.equal(oct.nodes[0].lods.length, 2);
+    assert.deepEqual(Array.from(oct.nodeLevel), [1, 0]);
+    assert.deepEqual(Array.from(oct.nodeSplats), [50, 100]);
 });
 
 test('GSplatOctreeResource: exposes hierarchyMode and metadata from tree data', () => {
@@ -102,5 +96,6 @@ test('GSplatOctreeResource: exposes hierarchyMode and metadata from tree data', 
         destroy() {} };
     const res = new GSplatOctreeResource('file:///scene.lcc2', data, fakeAssetLoader);
     assert.equal(res.hierarchyMode, 'tree');
+    assert.equal(res.numSplats, 100, 'preserves a populated root');
     assert.deepEqual(res.metadata, { virtualLoD: null, lodSplats: [100, 50] });
 });

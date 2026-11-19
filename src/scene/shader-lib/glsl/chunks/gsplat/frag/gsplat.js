@@ -56,11 +56,25 @@ float normExp(float x) {
 
 void main(void) {
     mediump float A = dot(gaussianUV, gaussianUV);
+
+    // over-unity opacity (see gsplatHelpersVS): an alpha above 1 is 1 + the core radius, drawn with peak
+    // alpha 1 as the plain gaussian's falloff stretched from the core to the quad edge. Overdraw mode
+    // passes a scaled opacity instead, so it keeps the plain profile.
+    mediump float peak = gaussianColor.a;
+    #ifndef GSPLAT_OVERDRAW
+        if (peak > 1.0) {
+            float core = peak - 1.0;
+            float c = max(0.0, sqrt(A) - core) / (1.0 - core);
+            A = c * c;
+            peak = 1.0;
+        }
+    #endif
+
     if (A > 1.0) {
         discard;
     }
 
-    mediump float alpha = normExp(A) * gaussianColor.a;
+    mediump float alpha = normExp(A) * peak;
 
     #if defined(SHADOW_PASS) || defined(PICK_PASS) || defined(PREPASS_PASS)
         if (alpha < alphaClip) {
@@ -106,6 +120,10 @@ void main(void) {
         #endif
 
         gl_FragColor = vec4(fragColor.xyz * fragColor.a, fragColor.a);
+
+        #if defined(GSPLAT_GL_COVERAGE) && defined(FORWARD_PASS) && defined(DITHER_NONE) && !defined(PICK_PASS) && !defined(SHADOW_PASS) && !defined(PREPASS_PASS) && !defined(SCENE_TEXTURE_DEPTH)
+            pcFragColor1 = gl_FragColor;
+        #endif
 
         // The same premultiplied blending which composites the color accumulates the scene depth, so
         // the splats gain a depth without being rendered a second time. Dithered splats render as

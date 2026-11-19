@@ -68,6 +68,7 @@ class WebglShader {
      */
     destroy(shader) {
         if (this.glProgram) {
+            shader.device.splatCoverage?.releaseClassifier(this.glProgram);
             shader.device.gl.deleteProgram(this.glProgram);
             this.glProgram = null;
         }
