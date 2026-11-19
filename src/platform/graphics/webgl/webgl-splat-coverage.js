@@ -1,7 +1,7 @@
 import { Debug } from '../../../core/debug.js';
 import { BLENDEQUATION_ADD, BLENDMODE_ONE, BLENDMODE_ONE_MINUS_SRC_ALPHA, CULLFACE_NONE, PIXELFORMAT_RGB8, PIXELFORMAT_RGBA8 } from '../constants.js';
 import { WebglShaderProcessorGLSL } from './webgl-shader-processor-glsl.js';
-import { leafSize, fullscreen, makeMask, leaf, reduce, makeGather, makeResolve } from './webgl-splat-coverage-shaders.js';
+import { leafSize, levelWidth, fullscreen, makeMask, leaf, reduce, makeGather, makeResolve } from './webgl-splat-coverage-shaders.js';
 
 const orderLayouts = new WeakMap();
 const chunkSize = 2048 * 2048;
@@ -24,6 +24,7 @@ class WebglSplatCoverage {
         this.device = device;
         this.gl = device.gl;
         this.classifiers = new Map();
+        this.stages = new Map();
         this.incompatibleShaders = new WeakSet();
         this.read = new Uint32Array(4);
         this.resources = null;
@@ -48,10 +49,8 @@ class WebglSplatCoverage {
             state.colorDstFactor === BLENDMODE_ONE_MINUS_SRC_ALPHA && state.alphaDstFactor === BLENDMODE_ONE_MINUS_SRC_ALPHA;
     }
 
-    program(fragment, programs) {
+    program(fragment, program) {
         const gl = this.gl;
-        const program = gl.createProgram();
-        programs.push(program);
         for (const [type, source] of [[gl.VERTEX_SHADER, fullscreen], [gl.FRAGMENT_SHADER, fragment]]) {
             const shader = gl.createShader(type);
             gl.shaderSource(shader, source);
@@ -70,19 +69,34 @@ class WebglSplatCoverage {
         return { program, uniforms };
     }
 
+    stage(fragment) {
+        let stage = this.stages.get(fragment);
+        if (!stage) {
+            const program = this.gl.createProgram();
+            try {
+                stage = this.program(fragment, program);
+            } catch (error) {
+                this.gl.deleteProgram(program);
+                throw error;
+            }
+            this.stages.set(fragment, stage);
+        }
+        return stage;
+    }
+
     classifier(shader) {
         const gl = this.gl;
         const native = shader.impl.glProgram;
         if (this.incompatibleShaders.has(native)) return null;
         let result = this.classifiers.get(native);
         if (result) return result;
-        const programs = [];
+        const program = gl.createProgram();
         try {
             const fragment = shader.splatClassifierSource;
             const definition = shader.definition;
             const source = definition.processingOptions ?
                 WebglShaderProcessorGLSL.run(this.device, { ...definition, vshader: fullscreen, fshader: fragment }, shader).fshader : fragment;
-            result = this.program(source, programs);
+            result = this.program(source, program);
             for (let i = 0; i < gl.getProgramParameter(result.program, gl.ACTIVE_UNIFORM_BLOCKS); i++) {
                 const name = gl.getActiveUniformBlockName(result.program, i);
                 const origin = gl.getUniformBlockIndex(native, name);
@@ -103,7 +117,7 @@ class WebglSplatCoverage {
             this.classifiers.set(native, result);
             return result;
         } catch (error) {
-            programs.forEach(program => gl.deleteProgram(program));
+            gl.deleteProgram(program);
             this.incompatibleShaders.add(native);
             Debug.warnOnce(`WebGL splat classifier unavailable: ${error.message}`);
             return null;
@@ -124,7 +138,6 @@ class WebglSplatCoverage {
         const gl = this.gl;
         r.framebuffers.forEach(framebuffer => gl.deleteFramebuffer(framebuffer));
         r.textures.forEach(texture => gl.deleteTexture(texture));
-        r.programs.forEach(program => gl.deleteProgram(program));
         gl.deleteVertexArray(r.vao);
         gl.deleteRenderbuffer(r.depth);
         this.device._vram.tex -= r.bytes;
@@ -135,6 +148,8 @@ class WebglSplatCoverage {
         this.releaseResources();
         this.classifiers.forEach(result => this.gl.deleteProgram(result.program));
         this.classifiers.clear();
+        this.stages.forEach(stage => this.gl.deleteProgram(stage.program));
+        this.stages.clear();
     }
 
     isOpaqueRgb8() {
@@ -175,7 +190,6 @@ class WebglSplatCoverage {
             rankCapacity,
             textures: [],
             framebuffers: [],
-            programs: [],
             bytes: 0,
             vao: gl.createVertexArray(),
             depth: null };
@@ -228,7 +242,7 @@ class WebglSplatCoverage {
         r.levels = [];
         let length = Math.ceil(rankCapacity / leafSize);
         while (true) {
-            const w = Math.min(1024, length);
+            const w = Math.min(levelWidth, length);
             const h = Math.ceil(length / w);
             // A leaf is an eight-bit presence mask. Preserve upper prefix counts
             // exactly in the smallest native unsigned format that can hold them.
@@ -243,11 +257,11 @@ class WebglSplatCoverage {
         }
         r.packed = texture(gl.R32UI, 2048, 2048, 4);
         r.packedTarget = framebuffer(r.packed);
-        r.mask = this.program(makeMask(opaqueRgb8), r.programs);
-        r.leaf = this.program(leaf, r.programs);
-        r.reduce = this.program(reduce, r.programs);
-        r.gather = this.program(makeGather(r.levels), r.programs);
-        r.resolve = this.program(makeResolve(opaqueRgb8), r.programs);
+        r.mask = this.stage(makeMask(opaqueRgb8));
+        r.leaf = this.stage(leaf);
+        r.reduce = this.stage(reduce);
+        r.gather = this.stage(makeGather(r.levels.length));
+        r.resolve = this.stage(makeResolve(opaqueRgb8));
         return r;
     }
 
@@ -441,7 +455,7 @@ class WebglSplatCoverage {
         } catch (error) {
             Debug.warnOnce(`WebGL splat coverage unavailable: ${error.message}`);
             this.failed = true;
-            this.releaseResources();
+            this.destroy();
             return false;
         } finally {
             gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readTarget);

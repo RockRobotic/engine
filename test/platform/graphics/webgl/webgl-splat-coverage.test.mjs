@@ -5,6 +5,19 @@ import { BLENDEQUATION_ADD, BLENDMODE_ONE, BLENDMODE_ONE_MINUS_SRC_ALPHA, CULLFA
 import { WebglSplatCoverage } from '../../../../src/platform/graphics/webgl/webgl-splat-coverage.js';
 import { getCoverageRows } from '../../../../src/scene/gsplat-unified/gsplat-world-state.js';
 
+function makeCoverage() {
+    const gl = {};
+    for (const name of ['createVertexArray', 'createTexture', 'createFramebuffer', 'createProgram']) gl[name] = () => ({});
+    for (const name of ['bindTexture', 'texStorage2D', 'texParameteri', 'bindFramebuffer',
+        'framebufferTexture2D', 'drawBuffers', 'deleteFramebuffer', 'deleteTexture', 'deleteProgram',
+        'deleteVertexArray', 'deleteRenderbuffer']) gl[name] = () => {};
+    gl.checkFramebufferStatus = () => 0;
+    gl.FRAMEBUFFER_COMPLETE = 0;
+    const coverage = new WebglSplatCoverage({ gl, _vram: { tex: 0 } });
+    coverage.program = sinon.stub().callsFake((source, program) => ({ program }));
+    return coverage;
+}
+
 describe('WebGL splat coverage', function () {
     it('snapshots and merges occupied framebuffer rows of the committed allocation', function () {
         const blocks = [{ offset: 11903, size: 120 }, { offset: 121, size: 20 }, { offset: 1103, size: 30 }];
@@ -73,15 +86,7 @@ describe('WebGL splat coverage', function () {
     });
 
     it('retains rounded live storage when the next sorted layout shrinks', function () {
-        const gl = {};
-        for (const name of ['createVertexArray', 'createTexture', 'createFramebuffer']) gl[name] = () => ({});
-        for (const name of ['bindTexture', 'texStorage2D', 'texParameteri', 'bindFramebuffer',
-            'framebufferTexture2D', 'drawBuffers', 'deleteFramebuffer', 'deleteTexture', 'deleteProgram',
-            'deleteVertexArray', 'deleteRenderbuffer']) gl[name] = () => {};
-        gl.checkFramebufferStatus = () => 0;
-        gl.FRAMEBUFFER_COMPLETE = 0;
-        const coverage = new WebglSplatCoverage({ gl, _vram: { tex: 0 } });
-        coverage.program = () => ({});
+        const coverage = makeCoverage();
         const first = coverage.ensureResources(1720, 1289, 7583, false, 4390, 33283846);
         expect(first.rowCapacity).to.equal(4608);
         expect(first.rankCapacity).to.equal(33554432);
@@ -93,12 +98,35 @@ describe('WebGL splat coverage', function () {
         expect(coverage.device._vram.tex).to.equal(0);
     });
 
+    it('reuses linked stages when streamed order capacity and atlas dimensions change', function () {
+        const coverage = makeCoverage();
+        const first = coverage.ensureResources(1720, 1289, 4000, false, 2500, 10000000);
+        expect(coverage.program.callCount).to.equal(5);
+        const next = coverage.ensureResources(1720, 1289, 4200, false, 3000, 14000000);
+        expect(next).not.to.equal(first);
+        expect(coverage.program.callCount).to.equal(5);
+        expect(next.gather).to.equal(first.gather);
+        const larger = coverage.ensureResources(1720, 1289, 8000, false, 5500, 42000000);
+        expect(coverage.program.callCount).to.equal(6);
+        expect(larger.gather).not.to.equal(next.gather);
+        expect(larger.mask).to.equal(first.mask);
+        const original = coverage.ensureResources(1720, 1289, 4000, false, 2500, 10000000);
+        expect(original.gather).to.equal(first.gather);
+        sinon.stub(coverage, 'isOpaqueRgb8').returns(true);
+        const opaque = coverage.ensureResources(800, 600, 4000, false, 2500, 10000000);
+        expect(opaque.gather).to.equal(first.gather);
+        expect(opaque.mask).not.to.equal(first.mask);
+        expect(opaque.resolve).not.to.equal(first.resolve);
+        coverage.destroy();
+    });
+
     it('releases all framebuffer storage and memory accounting once', function () {
         const gl = Object.fromEntries(['deleteProgram', 'deleteVertexArray', 'deleteRenderbuffer',
             'deleteTexture', 'deleteFramebuffer'].map(name => [name, sinon.spy()]));
         const device = { gl, _vram: { tex: 164 } };
         const coverage = new WebglSplatCoverage(device);
-        coverage.resources = { bytes: 100, framebuffers: [1, 2], textures: [3, 4, 5], programs: [6], vao: 7, depth: 8 };
+        coverage.resources = { bytes: 100, framebuffers: [1, 2], textures: [3, 4, 5], vao: 7, depth: 8 };
+        coverage.stages.set('leaf', { program: 6 });
         coverage.classifiers.set(11, { program: 9 });
         coverage.destroy();
         coverage.destroy();

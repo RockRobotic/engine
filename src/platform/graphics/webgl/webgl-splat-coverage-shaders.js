@@ -2,6 +2,7 @@
 // contain four cumulative counts. Descending the tree recovers the source
 // rank of a survivor without changing native source-over order.
 const leafSize = 8;
+const levelWidth = 1024;
 
 const fullscreen = `#version 300 es
 void main() {
@@ -66,7 +67,7 @@ uniform uint atlas;
 uniform uint count;
 layout(location = 0) out uint mask;
 void main() {
-    uint first = pixelRank(1024u) * ${leafSize}u;
+    uint first = pixelRank(${levelWidth}u) * ${leafSize}u;
     uint bits = 0u;
     ivec2 origin = atlasAddress(first, atlas);
     for (uint i = 0u; i < ${leafSize}u && first + i < count; ++i) {
@@ -102,12 +103,14 @@ void main() {
     node = prefix;
 }`;
 
-function makeGather(levels) {
+function makeGather(levelCount) {
     let declarations = '';
     let descent = '';
-    for (let i = levels.length - 1; i >= 0; i--) {
+    for (let i = levelCount - 1; i >= 0; i--) {
         declarations += `uniform usampler2D level${i};\n`;
-        const read = `texelFetch(level${i}, address(child, ${levels[i].width}u), 0)`;
+        // Short levels fit in one row, where every valid child is below the level width.
+        // The same stride therefore addresses all levels even when the atlas changes.
+        const read = `texelFetch(level${i}, address(child, ${levelWidth}u), 0)`;
         if (i > 0) {
             descent += `{ uvec4 ends = ${read};
                 uint branch = uint(rank >= ends.x) + uint(rank >= ends.y) + uint(rank >= ends.z);
@@ -155,4 +158,4 @@ void main() {
 }`;
 }
 
-export { leafSize, fullscreen, makeMask, leaf, reduce, makeGather, makeResolve };
+export { leafSize, levelWidth, fullscreen, makeMask, leaf, reduce, makeGather, makeResolve };
