@@ -469,6 +469,9 @@ class GSplatWorld {
                 this._layerPlacementsDirty = true;
                 this._placementSetChanged = true;
                 this._octreeInstancesToDestroy.push(inst);
+            } else if (inst.octree.environmentUrl && inst.updateEnvironment()) {
+                this._layerPlacementsDirty = true;
+                this._placementSetChanged = true;
             }
         }
 

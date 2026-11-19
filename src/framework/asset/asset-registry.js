@@ -624,7 +624,8 @@ class AssetRegistry extends EventHandler {
         const name = path.getBasename(filename || url);
 
         const file = {
-            filename: filename || name,
+            // Use the URL path for parser selection because query values can contain slashes.
+            filename: filename || path.getBasename(url.split(/[?#]/, 1)[0]),
             url: url
         };
 

@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 
 import { Entity } from '../../../../src/framework/entity.js';
+import { GSplatOctreeResource } from '../../../../src/scene/gsplat-unified/gsplat-octree.resource.js';
 import { GSplatPlacement } from '../../../../src/scene/gsplat-unified/gsplat-placement.js';
 import { createApp } from '../../../app.mjs';
 import { jsdomSetup, jsdomTeardown } from '../../../jsdom.mjs';
@@ -28,10 +29,33 @@ describe('GSplatComponent', function () {
             expect(e.gsplat).to.exist;
             expect(e.gsplat.enabled).to.equal(true);
             expect(e.gsplat.castShadows).to.equal(false);
+            expect(e.gsplat.environmentVisible).to.equal(true);
+            expect(e.gsplat.hasEnvironment).to.equal(false);
             expect(e.gsplat.lodRangeMin).to.equal(0);
             expect(e.gsplat.lodRangeMax).to.equal(99);
             expect(e.gsplat.lodBaseDistance).to.equal(5);
             expect(e.gsplat.lodMultiplier).to.equal(3);
+        });
+
+        it('exposes manifest availability before streaming and keeps visibility on new placements', function () {
+            const e = new Entity();
+            e.addComponent('gsplat', { environmentVisible: false });
+            app.root.addChild(e);
+            const resource = new GSplatOctreeResource('/scene/lod-meta.json', {
+                environment: 'sky.sog',
+                lodLevels: 1,
+                filenames: [],
+                tree: { bound: { min: [0, 0, 0], max: [1, 1, 1] }, children: [] }
+            }, null);
+            e.gsplat.resource = resource;
+            expect(e.gsplat.hasEnvironment).to.equal(true);
+            expect(e.gsplat._placement.environmentVisible).to.equal(false);
+            expect(e.clone().gsplat.environmentVisible).to.equal(false);
+            e.gsplat.environmentVisible = true;
+            expect(e.gsplat._placement.environmentVisible).to.equal(true);
+            e.gsplat.resource = null;
+            expect(e.gsplat.hasEnvironment).to.equal(false);
+            resource.destroy();
         });
 
         it('initializes LOD properties from data', function () {

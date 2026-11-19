@@ -6,6 +6,7 @@ import { AssetReference } from '../../asset/asset-reference.js';
 import { Component } from '../component.js';
 import { Debug } from '../../../core/debug.js';
 import { GSplatPlacement } from '../../../scene/gsplat-unified/gsplat-placement.js';
+import { GSplatOctreeResource } from '../../../scene/gsplat-unified/gsplat-octree.resource.js';
 import { PickerId } from '../../../scene/picker-id.js';
 
 /**
@@ -105,6 +106,9 @@ class GSplatComponent extends Component {
      * @private
      */
     _lodBaseDistance = 5;
+
+    /** @private */
+    _environmentVisible = true;
 
     /**
      * Geometric multiplier between successive LOD transition distances.
@@ -760,6 +764,39 @@ class GSplatComponent extends Component {
         return this._resource ?? this._assetReference.asset?.resource ?? null;
     }
 
+    /**
+     * Whether the loaded LOD manifest declares an environment splat asset. Available as soon as
+     * the manifest loads, even when the environment is hidden or its data is still downloading.
+     *
+     * @type {boolean}
+     */
+    get hasEnvironment() {
+        const resource = /** @type {GSplatResourceBase|GSplatOctreeResource|null} */ (this.resource);
+        return resource instanceof GSplatOctreeResource && !!resource.octree?.environmentUrl;
+    }
+
+    /**
+     * Sets whether the unified renderer streams and displays this component's environment splats.
+     * Defaults to true. Can be set before assigning the asset.
+     *
+     * @type {boolean}
+     */
+    set environmentVisible(value) {
+        this._environmentVisible = value;
+        if (this._placement) {
+            this._placement.environmentVisible = value;
+        }
+    }
+
+    /**
+     * Gets the requested visibility of this component's environment splats.
+     *
+     * @type {boolean}
+     */
+    get environmentVisible() {
+        return this._environmentVisible;
+    }
+
     /** @private */
     destroyInstance() {
 
@@ -1030,6 +1067,7 @@ class GSplatComponent extends Component {
 
             this._placement = new GSplatPlacement(resource, this.entity, 0, this._parameters, null, this._id);
             this._placement.lodBaseDistance = this._lodBaseDistance;
+            this._placement.environmentVisible = this._environmentVisible;
             this._placement.lodMultiplier = this._lodMultiplier;
             this._placement.lodRangeMin = this._lodRangeMin;
             this._placement.lodRangeMax = this._lodRangeMax;

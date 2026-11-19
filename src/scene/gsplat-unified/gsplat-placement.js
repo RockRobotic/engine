@@ -61,6 +61,9 @@ class GSplatPlacement {
      */
     lodIndex = 0;
 
+    /** Whether each camera should stream and display the octree environment for this placement. */
+    environmentVisible = true;
+
     /**
      * Minimum allowed LOD index (inclusive). Clamped to the asset's valid range at use.
      *

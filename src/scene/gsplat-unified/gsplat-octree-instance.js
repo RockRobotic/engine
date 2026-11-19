@@ -351,7 +351,7 @@ class GSplatOctreeInstance {
         let count = this.pending.size + this.prefetchPending.size;
 
         // Add environment if it's configured but not yet loaded
-        if (this.octree.environmentUrl && !this.environmentPlacement) {
+        if (this.octree.environmentUrl && this.placement.environmentVisible && !this.environmentPlacement) {
             count++;
         }
 
@@ -364,6 +364,9 @@ class GSplatOctreeInstance {
      * @type {GSplatPlacement|null}
      */
     environmentPlacement = null;
+
+    /** @private */
+    _holdsEnvironment = false;
 
     /**
      * Event handle for device lost event.
@@ -397,12 +400,6 @@ class GSplatOctreeInstance {
         const numFiles = octree.files.length;
         this.filePlacements = new Array(numFiles).fill(null);
 
-        // Handle environment if configured
-        if (octree.environmentUrl) {
-            octree.incEnvironmentRefCount();
-            octree.ensureEnvironmentResource();
-        }
-
         // Register device lost handler
         this._deviceLostEvent = device.on('devicelost', this._onDeviceLost, this);
     }
@@ -433,21 +430,14 @@ class GSplatOctreeInstance {
             for (const fileIndex of filesToDecRef) {
                 this.octree.decRefCount(fileIndex, 0);
             }
-
-            // Clean up environment if present
-            if (this.environmentPlacement) {
-                this.octree.decEnvironmentRefCount();
-            }
         }
 
         this.pending.clear();
         this.filePlacements.length = 0;
 
-        // Clean up environment placement
-        if (this.environmentPlacement) {
-            this.activePlacements.delete(this.environmentPlacement);
-            this.environmentPlacement = null;
-        }
+        // Deferred releases cover LOD files. World states retain their own environment resource
+        // references, so this instance can withdraw its streaming request immediately.
+        this._releaseEnvironment();
 
         // Remove device event listener
         this._deviceLostEvent?.off();
@@ -482,12 +472,7 @@ class GSplatOctreeInstance {
         }
         this._drawnCount = 0;
 
-        // Clean up environment if present
-        if (this.environmentPlacement) {
-            this.activePlacements.delete(this.environmentPlacement);
-            this.environmentPlacement = null;
-            this.octree.unloadEnvironmentResource();
-        }
+        this._releaseEnvironment();
 
         // Mark that LOD needs to be re-evaluated after context restore
         this.dirtyModifiedPlacements = true;
@@ -1256,30 +1241,52 @@ class GSplatOctreeInstance {
         // watch prefetched loads for completion to allow promotion
         this.pollPrefetchCompletions();
 
-        // handle environment loading
-        if (this.octree.environmentUrl && !this.environmentPlacement) {
-            // poll for environment resource completion
-            this.octree.ensureEnvironmentResource();
-            const envResource = this.octree.environmentResource;
-
-            if (envResource) {
-                // create environment placement with the loaded resource
-                this.environmentPlacement = new GSplatPlacement(envResource, this.placement.node, 0, null, this.placement);
-                this.environmentPlacement.aabb.copy(envResource.aabb);
-                this.activePlacements.add(this.environmentPlacement);
-                this.dirtyModifiedPlacements = true;
-                this.dirtyPlacementSetChanged = true;
-
-                // Now that the placement exists, _onDeviceLost will tear down this resource,
-                // so its CPU-side ImageBitmap sources are no longer needed for re-upload.
-                envResource.releaseTextureSources?.();
-            }
-        }
-
         // check if any placements need LOD update
         const dirty = this.dirtyModifiedPlacements;
         this.dirtyModifiedPlacements = false;
         return dirty;
+    }
+
+    /**
+     * Reconciles this camera's environment with the owning component, independently of LOD
+     * evaluations. Called for octrees with an environment URL.
+     *
+     * @returns {boolean} Whether a placement was added or removed from this camera's world.
+     */
+    updateEnvironment() {
+        if (!this.placement.environmentVisible) {
+            if (!this._holdsEnvironment) return false;
+            const wasActive = !!this.environmentPlacement;
+            this._releaseEnvironment();
+            return wasActive;
+        }
+
+        if (this.environmentPlacement) return false;
+        if (!this._holdsEnvironment) {
+            this.octree.incEnvironmentRefCount();
+            this._holdsEnvironment = true;
+        }
+        this.octree.ensureEnvironmentResource();
+        const resource = this.octree.environmentResource;
+        if (!resource) return false;
+
+        this.environmentPlacement = new GSplatPlacement(resource, this.placement.node, 0, null, this.placement);
+        this.activePlacements.add(this.environmentPlacement);
+        resource.releaseTextureSources?.();
+        return true;
+    }
+
+    /** @private */
+    _releaseEnvironment() {
+        if (this.environmentPlacement) {
+            this.activePlacements.delete(this.environmentPlacement);
+            this.environmentPlacement.destroy();
+            this.environmentPlacement = null;
+        }
+        if (this._holdsEnvironment) {
+            if (!this.octree.destroyed) this.octree.decEnvironmentRefCount();
+            this._holdsEnvironment = false;
+        }
     }
 
     /**

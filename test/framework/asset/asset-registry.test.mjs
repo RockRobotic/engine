@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { expect } from 'chai';
 import { restore, spy, stub } from 'sinon';
 
@@ -240,6 +242,18 @@ describe('AssetRegistry', function () {
     describe('#loadFromUrl', function () {
 
         const assetPath = '/test/assets/';
+
+        it('infers the LCC2 parser filename from the URL path when its query contains slashes', async function () {
+            const url = `${assetPath}scene.lcc2?route=a/b`;
+            const manifest = JSON.parse(readFileSync(new URL('../../fixtures/lcc2/tiny.lcc2.json', import.meta.url), 'utf8'));
+            stub(http, 'get').callsArgWith(2, null, manifest);
+            const { err, asset } = await new Promise((resolve) => {
+                app.assets.loadFromUrl(url, 'gsplat', (err, asset) => resolve({ err, asset }));
+            });
+            expect(err).to.be.null;
+            expect(asset.file.filename).to.equal('scene.lcc2');
+            expect(asset.resource.octree.files[0].url).to.equal(`${assetPath}data/3dgs/depth1a.sog`);
+        });
 
         it('loads binary assets', (done) => {
             app.assets.loadFromUrl(`${assetPath}test.bin`, 'binary', (err, asset) => {

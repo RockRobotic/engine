@@ -242,8 +242,8 @@ class GSplatOctree {
         this.lodLevels = data.lodLevels;
         this.assetFileUrl = assetFileUrl;
 
-        // expand all file paths to full URLs upfront to avoid repeated joins later
-        const baseDir = path.getDirectory(assetFileUrl);
+        // A query or fragment can contain slashes of its own. Only the manifest path locates its children.
+        const baseDir = path.getDirectory(assetFileUrl.split(/[?#]/, 1)[0]);
         this.files = data.filenames.map(url => ({
             url: path.isRelativePath(url) ? path.join(baseDir, url) : url,
             lodLevel: -1
@@ -401,6 +401,7 @@ class GSplatOctree {
         this.assetLoader?.destroy();
         this.assetLoader = null;
         this.environmentResource = null;
+        this.environmentRefCount = 0;
     }
 
     /**
@@ -881,7 +882,7 @@ class GSplatOctree {
     }
 
     /**
-     * Unloads environment resource if currently loaded.
+     * Releases the environment resource or withdraws its queued or in-flight load.
      */
     unloadEnvironmentResource() {
         // If octree was destroyed, assetLoader is null - nothing to unload
@@ -889,7 +890,7 @@ class GSplatOctree {
             return;
         }
 
-        if (this.environmentResource && this.environmentUrl) {
+        if (this.environmentUrl) {
             this.assetLoader.unload(this.environmentUrl);
             this.environmentResource = null;
         }

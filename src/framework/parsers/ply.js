@@ -618,19 +618,36 @@ class PlyParser {
      */
     async load(url, callback, asset) {
         const gsplatCentersEnabledAtLoad = this.app.scene?.gsplatCentersEnabled !== false;
+        const controller = new AbortController();
+        const contents = asset.file?.contents;
+        let reader;
+        const cancel = () => {
+            if (!controller.signal.aborted) {
+                controller.abort();
+                // A caller-supplied response is independent of our fetch signal.
+                if (contents && reader) reader.cancel().catch(() => {});
+            }
+        };
+        const onUnload = asset.once('unload', cancel);
+        const onRemove = asset.once('remove', cancel);
 
         try {
             // either use the fetch request passed in by the application or initiate it ourselves.
             // credentials: 'include' lets CloudFront signed cookies authorize cross-origin fetches.
-            const response = await (asset.file?.contents ?? fetch(url.load, { credentials: 'include' }));
+            const response = await (contents ?? fetch(url.load, { credentials: 'include', signal: controller.signal }));
+            if (controller.signal.aborted) {
+                callback(null, null);
+                return;
+            }
             if (!response || !response.body) {
                 callback('Error loading resource', null);
             } else {
                 const totalLength = parseInt(response.headers.get('content-length') ?? '0', 10);
                 let totalReceived = 0;
 
+                reader = response.body.getReader();
                 const data = await readPly(
-                    response.body.getReader(),
+                    reader,
                     asset.data.elementFilter ?? defaultElementFilter,
                     (bytes) => {
                         totalReceived += bytes;
@@ -640,16 +657,18 @@ class PlyParser {
                     }
                 );
 
-                // nothing cancels the download, so it can complete after the application was
-                // destroyed. Skip processing the data - the loader drops the result anyway.
                 const device = this.app.graphicsDevice;
-                if (!device || device._destroyed) {
+                if (controller.signal.aborted || !device || device._destroyed) {
                     callback(null, null);
                     return;
                 }
 
                 // allow application to process the data
                 asset.fire('load:data', data);
+                if (controller.signal.aborted) {
+                    callback(null, null);
+                    return;
+                }
 
                 // reorder data
                 if (!data.isCompressed) {
@@ -668,7 +687,11 @@ class PlyParser {
                 callback(null, resource);
             }
         } catch (err) {
-            callback(err, null);
+            // A withdrawn request yields no resource and can be retried if the URL is needed again.
+            callback(controller.signal.aborted ? null : err, null);
+        } finally {
+            onUnload.off();
+            onRemove.off();
         }
     }
 

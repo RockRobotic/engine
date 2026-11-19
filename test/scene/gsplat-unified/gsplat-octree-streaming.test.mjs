@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 
 import { Vec3 } from '../../../src/core/math/vec3.js';
+import { BoundingBox } from '../../../src/core/shape/bounding-box.js';
 import { GSplatAssetLoader } from '../../../src/framework/components/gsplat/gsplat-asset-loader.js';
 import { PROJECTION_PERSPECTIVE } from '../../../src/scene/constants.js';
 import { GraphNode } from '../../../src/scene/graph-node.js';
@@ -127,6 +128,71 @@ const addView = (octree, { lodUnderfillLimit = 1, lodBehindPenalty = 1.5 } = {})
 
     return { inst, placement, camera, lodUpdate };
 };
+
+describe('streamed environment visibility', function () {
+    it('applies a placement setting to each camera, including a newly created world', function () {
+        const { octree, loader, registry, resolve } = makeStreaming([-5]);
+        const url = '/scene/env.sog';
+        octree.environmentUrl = url;
+        const placement = new GSplatPlacement(null, new GraphNode());
+        placement.environmentVisible = false;
+        const makeInstance = () => new GSplatOctreeInstance({ on: () => ({ off() {} }) }, octree, placement);
+        const a = makeInstance();
+        const b = makeInstance();
+        a.updateEnvironment();
+        b.updateEnvironment();
+        expect(registry.started).to.be.empty;
+        expect(a.pendingLoadCount).to.equal(0);
+
+        placement.environmentVisible = true;
+        a.updateEnvironment();
+        b.updateEnvironment();
+        expect(registry.started).to.deep.equal([url]);
+        expect(a.pendingLoadCount).to.equal(1);
+        resolve(url);
+        loader.getResource(url).aabb = new BoundingBox();
+        expect(a.updateEnvironment()).to.equal(true);
+        expect(b.updateEnvironment()).to.equal(true);
+        expect(a.activePlacements.has(a.environmentPlacement)).to.equal(true);
+        expect(b.activePlacements.has(b.environmentPlacement)).to.equal(true);
+        expect(a.pendingLoadCount).to.equal(0);
+
+        placement.environmentVisible = false;
+        expect(a.updateEnvironment()).to.equal(true);
+        expect(a.activePlacements.size).to.equal(0);
+        expect(loader.getResource(url)).to.exist;
+        expect(b.updateEnvironment()).to.equal(true);
+        expect(loader.getResource(url)).to.be.undefined;
+        const replacement = makeInstance();
+        replacement.updateEnvironment();
+        expect(replacement.activePlacements.size).to.equal(0);
+        expect(octree.environmentRefCount).to.equal(0);
+        expect(registry.started).to.deep.equal([url]);
+        a.destroy();
+        b.destroy();
+        replacement.destroy();
+    });
+
+    it('withdraws the final pending request on hide, device loss and deferred teardown', function () {
+        const { octree, loader } = makeStreaming([-5]);
+        const url = '/scene/env.sog';
+        octree.environmentUrl = url;
+        const { inst, placement } = addView(octree);
+        inst.updateEnvironment();
+        placement.environmentVisible = false;
+        inst.updateEnvironment();
+        expect(loader._currentlyLoading.has(url)).to.equal(false);
+        placement.environmentVisible = true;
+        inst.updateEnvironment();
+        inst._onDeviceLost();
+        expect(loader._currentlyLoading.has(url)).to.equal(false);
+        inst.updateEnvironment();
+        expect(loader._currentlyLoading.has(url)).to.equal(true);
+        inst.destroy(true);
+        expect(octree.environmentRefCount).to.equal(0);
+        expect(loader._urlToAsset.has(url)).to.equal(false);
+    });
+});
 
 // A single camera streaming an octree.
 const makeScene = (zs, { maxConcurrentLoads = 2, ...viewOptions } = {}) => {

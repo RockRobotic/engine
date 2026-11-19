@@ -1,8 +1,14 @@
+import { readFile } from 'node:fs/promises';
+
 import { expect } from 'chai';
 import { restore, stub } from 'sinon';
 
+import { Asset } from '../../../src/framework/asset/asset.js';
+import { GSplatAssetLoader } from '../../../src/framework/components/gsplat/gsplat-asset-loader.js';
 import { PlyParser, isAntiAliased } from '../../../src/framework/parsers/ply.js';
 import { http } from '../../../src/platform/net/http.js';
+import { createApp } from '../../app.mjs';
+import { jsdomSetup, jsdomTeardown } from '../../jsdom.mjs';
 
 describe('PlyParser', function () {
 
@@ -19,7 +25,7 @@ describe('PlyParser', function () {
         parser.app = { scene: {} };
 
         await new Promise((resolve) => {
-            parser.load({ load: 'test.ply', original: 'test.ply' }, resolve, {});
+            parser.load({ load: 'test.ply', original: 'test.ply' }, resolve, new Asset('test', 'gsplat'));
         });
 
         return fetched.firstCall.args[1]?.credentials;
@@ -35,6 +41,52 @@ describe('PlyParser', function () {
         http.withCredentials = true;
 
         expect(await loadCredentials()).to.equal('include');
+    });
+
+    it('discards a withdrawn environment PLY and reloads it when visible again', async function () {
+        const bytes = await readFile(new URL('../../assets/test.ply', import.meta.url));
+        jsdomSetup();
+        const app = createApp();
+        const loader = new GSplatAssetLoader(app.assets);
+        try {
+            const url = '/environment.ply';
+            const textures = app.graphicsDevice.textures.size;
+            let finish;
+            const firstResponse = new Promise((resolve) => {
+                finish = resolve;
+            });
+            const fetch = stub(global, 'fetch');
+            fetch.onFirstCall().returns(firstResponse);
+            fetch.onSecondCall().resolves(new Response(bytes));
+
+            loader.load(url);
+            const original = app.assets.getByUrl(url);
+            loader.unload(url);
+            loader.load(url); // this request joins the old URL until its callback has settled
+            const replacement = app.assets.getByUrl(url);
+            const settled = new Promise((resolve, reject) => {
+                replacement.once('load', resolve);
+                replacement.once('error', reject);
+            });
+            finish(new Response(bytes));
+            await settled;
+            expect(original.resource).to.be.null;
+            expect(app.loader.getFromCache(url, 'gsplat')).to.be.undefined;
+            expect(app.graphicsDevice.textures.size).to.equal(textures);
+
+            const ready = new Promise((resolve, reject) => {
+                replacement.once('load', resolve);
+                replacement.once('error', reject);
+            });
+            loader.load(url);
+            await ready;
+            expect(loader.getResource(url).numSplats).to.equal(64);
+            expect(fetch.callCount).to.equal(2);
+        } finally {
+            loader.destroy();
+            app.destroy();
+            jsdomTeardown();
+        }
     });
 });
 

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 import { expect } from 'chai';
 import { restore, stub } from 'sinon';
 
@@ -47,6 +49,23 @@ describe('GSplatHandler (parser selection)', function () {
         expect(get.firstCall.args[1].withCredentials).to.be.true;
         expect(done.calledOnce).to.be.true;
         expect(done.firstCall.args[0]).to.include('unsupported LCC2 version');
+    });
+
+    it('loads an LCC2 root with slashes in its query and resolves children against its directory', function () {
+        const url = 'https://cdn.example/scans/scene.lcc2?route=a/b';
+        const lcc = JSON.parse(readFileSync(new URL('../../fixtures/lcc2/tiny.lcc2.json', import.meta.url), 'utf8'));
+        lcc.root.splatFiles[0] = 'data/3dgs/depth1a.sog?range=0/1';
+        lcc.root.splatFiles.push('env/sky.sog');
+        lcc.root.data.env = { name: 3 };
+        const get = stub(http, 'get').callsArgWith(2, null, lcc);
+        const done = stub();
+        handler.load(url, done, { file: { url } });
+
+        expect(get.firstCall.args[0]).to.equal(url);
+        expect(done.firstCall.args[0]).to.equal(null);
+        const { octree } = done.firstCall.args[1];
+        expect(octree.files[0].url).to.equal('https://cdn.example/scans/data/3dgs/depth1a.sog?range=0/1');
+        expect(octree.environmentUrl).to.equal('https://cdn.example/scans/env/sky.sog');
     });
 
     it('returns no parser for an unrecognized extension', function () {
