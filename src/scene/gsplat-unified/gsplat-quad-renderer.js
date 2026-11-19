@@ -6,6 +6,11 @@ import {
 import { ShaderMaterial } from '../materials/shader-material.js';
 import { GSplatResourceBase } from '../gsplat/gsplat-resource-base.js';
 import { MeshInstance } from '../mesh-instance.js';
+import { ShaderChunks } from '../shader-lib/shader-chunks.js';
+import { gsplatChunksGLSL } from '../shader-lib/glsl/collections/gsplat-chunks-glsl.js';
+import { shaderChunksGLSL } from '../shader-lib/glsl/collections/shader-chunks-glsl.js';
+import compactRead from '../shader-lib/glsl/chunks/gsplat/vert/formats/containerCompactRead.js';
+import packedRead from '../shader-lib/glsl/chunks/gsplat/vert/formats/containerPackedRead.js';
 import { GSplatRenderer } from './gsplat-renderer.js';
 
 /**
@@ -15,6 +20,16 @@ import { GSplatRenderer } from './gsplat-renderer.js';
  * @import { Layer } from '../layer.js'
  * @import { GSplatWorkBuffer } from './gsplat-work-buffer.js'
  */
+
+// Device overrides can replace nested helpers even when the material itself has no overrides.
+const coverageChunks = [
+    'gsplatVS', 'gsplatPS', 'gsplatCommonVS', 'gsplatCoverageClassifyPS', 'gsplatHelpersVS',
+    'gsplatFormatVS', 'gsplatStructsVS', 'gsplatSplatVS', 'gsplatEvalSHVS', 'gsplatQuatToMat3VS',
+    'gsplatSourceVS', 'gsplatCenterVS', 'gsplatCornerVS', 'gsplatOutputVS', 'gsplatModifyPS',
+    'sceneTexturesPS', 'decodePS', 'fogPS', 'gammaPS', 'tonemappingPS', 'tonemappingNonePS',
+    'tonemappingFilmicPS', 'tonemappingLinearPS', 'tonemappingHejlPS', 'tonemappingAcesPS',
+    'tonemappingAces2PS', 'tonemappingNeutralPS'
+].map(name => [name, gsplatChunksGLSL[name] ?? shaderChunksGLSL[name]]);
 
 /**
  * Renders splats from the work buffer using instanced quad rendering.
@@ -291,6 +306,37 @@ class GSplatQuadRenderer extends GSplatRenderer {
         }
     }
 
+    /**
+     * Each classifier fragment evaluates four independent splats. The built-in readers reset their
+     * transform cache in getCenter() and the packed reader resets its color cache in getOpacity().
+     * A custom reader or shader can retain state between lanes or depend on vertex-stage behavior.
+     * @private
+     */
+    _supportsCoverageShader(params) {
+        const { material } = params;
+        for (const [name, value] of material.defines) {
+            if (name !== 'GSPLAT_AA' || (value !== true && value !== 1 && value !== '1')) {
+                return false;
+            }
+        }
+
+        const chunks = this._material.shaderChunks.glsl;
+        const read = chunks.get('gsplatReadVS');
+        if (read !== compactRead && read !== packedRead) return false;
+
+        // The renderer installs its own stream declarations and reader. Any other local override
+        // besides the explicitly registered modifier uses the ordinary quad draw.
+        const hasModifier = chunks.has('gsplatModifyVS');
+        if (chunks.size !== (hasModifier ? 3 : 2) || !chunks.has('gsplatDeclarationsVS')) return false;
+
+        const deviceChunks = ShaderChunks.get(this.device);
+        const modifier = hasModifier ? chunks.get('gsplatModifyVS') : deviceChunks.get('gsplatModifyVS');
+        if (modifier !== gsplatChunksGLSL.gsplatModifyVS && (!hasModifier || modifier !== params.coverageModifierGLSL)) {
+            return false;
+        }
+        return coverageChunks.every(([name, code]) => deviceChunks.get(name) === code);
+    }
+
     frameUpdate(params) {
 
         // Whether the splats contribute to the scene depth. This only selects the blend state, as the
@@ -308,18 +354,6 @@ class GSplatQuadRenderer extends GSplatRenderer {
         this.fisheyeProj.update(this.resolveFisheye(params.fisheye), cam.fov, cam.projectionMatrix);
 
         const fisheyeEnabled = this.fisheyeProj.enabled;
-        if (this.device.isWebGL2) {
-            const chunks = params.material.shaderChunks.glsl;
-            const coverage = this.device.supportsSplatCoverage && !cam.xrActive && !fisheyeEnabled &&
-                !params.varyings.words && !params.colorRamp && !params.sceneDepthWrite &&
-                !params.material.getDefine('GSPLAT_2DGS') && !params.material.getDefine('GSPLAT_USER_VARYINGS') &&
-                !params.material.getDefine('GSPLAT_OVERDRAW') && !Number(params.material.defines.get('SH_BANDS')) &&
-                (chunks.size === 0 || (chunks.size === 1 && chunks.has('gsplatModifyVS')));
-            if (!!this._material.getDefine('GSPLAT_GL_COVERAGE') !== coverage) {
-                this._material.setDefine('GSPLAT_GL_COVERAGE', coverage);
-                this._material.update();
-            }
-        }
         if (fisheyeEnabled !== this._lastFisheyeEnabled) {
             this._lastFisheyeEnabled = fisheyeEnabled;
             this._material.setDefine('GSPLAT_FISHEYE', fisheyeEnabled);
@@ -352,6 +386,17 @@ class GSplatQuadRenderer extends GSplatRenderer {
         if (this._sourceMaterialVersion !== sourceMaterialVersion) {
             this.copyMaterialSettings(params.material);
             this._sourceMaterialVersion = sourceMaterialVersion;
+        }
+
+        if (this.device.isWebGL2) {
+            const coverage = this.device.supportsSplatCoverage && (params.splatBudget === 0 || params.splatBudget >= 4000000) &&
+                !cam.camera?.xrActive && !fisheyeEnabled &&
+                !params.varyings.words && !params.colorRamp && !params.sceneDepthWrite &&
+                this._supportsCoverageShader(params);
+            if (!!this._material.getDefine('GSPLAT_GL_COVERAGE') !== coverage) {
+                this._material.setDefine('GSPLAT_GL_COVERAGE', coverage);
+                this._material.update();
+            }
         }
     }
 

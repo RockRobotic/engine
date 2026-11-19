@@ -238,9 +238,10 @@ class GSplatUnifiedSorter extends EventHandler {
         this.hasNewVersion = true;
         this._deferredCamera = null; // sortParams are ordered by the previous layout's placements
 
-        // output size matches input size, clear available data when it changes
-        const { textureSize } = payload;
-        const newLength = textureSize * textureSize;
+        // The sorted sequence is dense even when the source atlas contains free blocks.
+        // Pad only its last row so WebGL can upload the complete rectangle directly.
+        const { textureSize, totalActiveSplats = textureSize * textureSize } = payload;
+        const newLength = Math.ceil(totalActiveSplats / textureSize) * textureSize;
         if (newLength !== this.bufferLength) {
             this.bufferLength = newLength;
             this.availableOrderData.length = 0;

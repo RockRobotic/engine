@@ -39,6 +39,13 @@ void main(void) {
     }
 
     vec3 modelCenter = getCenter();
+    #if defined(GSPLAT_COVERAGE_ALPHA_CAP) && defined(GSPLAT_SEPARATE_OPACITY) && !GSPLAT_AA && defined(FORWARD_PASS) && !defined(PICK_PASS) && !defined(SHADOW_PASS) && !defined(PREPASS_PASS)
+        // The active material guarantees its color modifier never increases opacity.
+        if (getOpacity() <= alphaClipForward) {
+            gl_Position = discardVec;
+            return;
+        }
+    #endif
 
     SplatCenter center;
     center.modelCenterOriginal = modelCenter;

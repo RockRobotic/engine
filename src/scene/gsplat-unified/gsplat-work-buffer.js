@@ -411,12 +411,16 @@ class GSplatWorkBuffer {
         // a full upload supersedes one still being sliced in
         this._orderUpload = null;
 
+        if (data.length === 0) return;
         const size = this.textureSize;
+        Debug.assert(data.length <= size * size);
         if (this.device.isWebGPU) {
-            Debug.assert(data.length <= size * size);
             this.uploadStream.upload(data, this.orderBuffer, 0, data.length);
         } else {
-            Debug.assert(data.length === size * size);
+            Debug.assert(data.length % size === 0);
+            // Keep direct uploads on the fresh-storage texImage2D path, including for
+            // partial atlases. The shader addresses order rows with the atlas width.
+            this.orderTexture.resize(size, data.length / size);
             this.uploadStream.upload(data, this.orderTexture, 0, data.length);
         }
     }
@@ -448,22 +452,23 @@ class GSplatWorkBuffer {
      */
     beginOrderUpload(data) {
         const size = this.textureSize;
-        if (this.device.isWebGPU || data.length !== size * size || data.byteLength <= ORDER_DIRECT_MAX_BYTES) {
+        if (this.device.isWebGPU || data.length > size * size || data.length % size !== 0 || data.byteLength <= ORDER_DIRECT_MAX_BYTES) {
             return false;
         }
 
+        const height = data.length / size;
         if (!this._orderTextureSpare) {
             this._orderTextureSpare = new Texture(this.device, {
                 name: 'SplatGlobalOrderSpare',
                 width: size,
-                height: size,
+                height,
                 format: PIXELFORMAT_R32U,
                 mipmaps: false,
                 addressU: ADDRESS_CLAMP_TO_EDGE,
                 addressV: ADDRESS_CLAMP_TO_EDGE
             });
-        } else if (this._orderTextureSpare.width !== size) {
-            this._orderTextureSpare.resize(size, size);
+        } else {
+            this._orderTextureSpare.resize(size, height);
         }
 
         this._orderUpload = { data, row: 0 };
@@ -483,7 +488,7 @@ class GSplatWorkBuffer {
         if (!upload || !spare) return null;
 
         const size = this.textureSize;
-        const rows = Math.min(this._orderUploadPacer.rows(size, 4), size - upload.row);
+        const rows = Math.min(this._orderUploadPacer.rows(size, 4), spare.height - upload.row);
         const start = upload.row * size;
 
         const t0 = now();
@@ -491,7 +496,7 @@ class GSplatWorkBuffer {
         this._orderUploadPacer.record(now() - t0);
 
         upload.row += rows;
-        if (upload.row < size) return null;
+        if (upload.row < spare.height) return null;
 
         // complete: the spare becomes the order texture, the old one the spare
         this._orderTextureSpare = this.orderTexture ?? null;
@@ -526,9 +531,8 @@ class GSplatWorkBuffer {
                 this.orderBuffer = new StorageBuffer(this.device, newByteSize, BUFFERUSAGE_COPY_DST);
                 DebugHelper.setName(this.orderBuffer, 'GsplatWorkBuffer.order');
             }
-        } else {
-            this.orderTexture.resize(textureSize, textureSize);
         }
+        // WebGL resizes the current or spare order texture when the matching sorted data arrives.
     }
 
     /**

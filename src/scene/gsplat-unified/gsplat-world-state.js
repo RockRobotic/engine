@@ -14,6 +14,12 @@ const _toFree = [];
 // Work-buffer slots can have holes after streaming or incremental defragmentation.
 // Keep a snapshot for this geometry version, since the allocator can advance while
 // a previous order is still bound. A small gap is cheaper to shade than another draw.
+/**
+ * @param {Iterable<MemBlock>} blocks - Active allocator blocks for this version.
+ * @param {number} width - Side length of the work buffer.
+ * @returns {number[]} Pairs of inclusive start and exclusive end rows.
+ * @ignore
+ */
 function getCoverageRows(blocks, width) {
     const ranges = Array.from(blocks, block => [
         Math.floor(block.offset / width), Math.ceil((block.offset + block.size) / width)

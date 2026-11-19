@@ -56,6 +56,43 @@ describe('WebGL splat coverage', function () {
         }
     });
 
+    it('restores each overwritten material sampler exactly once', function () {
+        const gl = { TEXTURE0: 32, TEXTURE_2D: 1, activeTexture: sinon.spy(), bindTexture: sinon.spy(), uniform1i: sinon.spy() };
+        const textureUnits = Array.from({ length: 16 }, (_, i) => [i + 100]);
+        const coverage = new WebglSplatCoverage({ gl, textureUnits });
+        coverage.sample(null, 3, 200);
+        coverage.sample(null, 15, 201);
+        coverage.sample(null, 3, 202);
+        gl.activeTexture.resetHistory();
+        gl.bindTexture.resetHistory();
+
+        coverage.restoreTextures();
+        coverage.restoreTextures();
+        expect(gl.activeTexture.args).to.deep.equal([[47], [35]]);
+        expect(gl.bindTexture.args).to.deep.equal([[1, 115], [1, 103]]);
+    });
+
+    it('retains rounded live storage when the next sorted layout shrinks', function () {
+        const gl = {};
+        for (const name of ['createVertexArray', 'createTexture', 'createFramebuffer']) gl[name] = () => ({});
+        for (const name of ['bindTexture', 'texStorage2D', 'texParameteri', 'bindFramebuffer',
+            'framebufferTexture2D', 'drawBuffers', 'deleteFramebuffer', 'deleteTexture', 'deleteProgram',
+            'deleteVertexArray', 'deleteRenderbuffer']) gl[name] = () => {};
+        gl.checkFramebufferStatus = () => 0;
+        gl.FRAMEBUFFER_COMPLETE = 0;
+        const coverage = new WebglSplatCoverage({ gl, _vram: { tex: 0 } });
+        coverage.program = () => ({});
+        const first = coverage.ensureResources(1720, 1289, 7583, false, 4390, 33283846);
+        expect(first.rowCapacity).to.equal(4608);
+        expect(first.rankCapacity).to.equal(33554432);
+        expect(coverage.ensureResources(1720, 1289, 7583, false, 4000, 12000000)).to.equal(first);
+        const next = coverage.ensureResources(1720, 1289, 7583, false, 4900, 10000000);
+        expect(next.rankCapacity).to.equal(first.rankCapacity);
+        expect(next.rowCapacity).to.equal(5376);
+        coverage.destroy();
+        expect(coverage.device._vram.tex).to.equal(0);
+    });
+
     it('releases all framebuffer storage and memory accounting once', function () {
         const gl = Object.fromEntries(['deleteProgram', 'deleteVertexArray', 'deleteRenderbuffer',
             'deleteTexture', 'deleteFramebuffer'].map(name => [name, sinon.spy()]));

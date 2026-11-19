@@ -27,6 +27,9 @@ let id = 0;
  * @category Graphics
  */
 class Shader {
+    /** @ignore */
+    splatClassifierSource = null;
+
     /**
      * Format of the uniform buffer for mesh bind group.
      *
@@ -115,6 +118,8 @@ class Shader {
      * varyings into a single buffer, or {@link TRANSFORM_FEEDBACK_SEPARATE} to store each varying
      * in its own buffer. This setting is only effective when useTransformFeedback property is enabled.
      * Defaults to {@link TRANSFORM_FEEDBACK_INTERLEAVED}.
+     * @param {boolean} [definition.splatCoverage] - The native unified splat material uses a
+     * verified WebGL coverage classifier.
      * @param {string} [definition.vshader] - Vertex shader source (GLSL code). Optional when
      * compute shader is specified.
      * @param {string} [definition.fshader] - Fragment shader source (GLSL code). Optional when
@@ -241,7 +246,7 @@ class Shader {
 
             // The WebGL coverage classifier shares the material's exact camera, format and
             // modifier chunks while running once per source texel in a fragment stage.
-            if (graphicsDevice.isWebGL2 && definition.vshader?.includes('uniform uint splatCoverageStart;')) {
+            if (graphicsDevice.isWebGL2 && definition.splatCoverage && definition.vshader?.includes('uniform uint splatCoverageStart;')) {
                 const classifier = vertexSource.replace('#version 300 es', '#version 300 es\n#define GSPLAT_COVERAGE_CLASSIFY');
                 this.splatClassifierSource = Preprocessor.run(classifier, definition.vincludes, {
                     sourceName: `coverage classifier for ${this.label}`

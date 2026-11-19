@@ -272,6 +272,54 @@ describe('GSplatManager CPU order uploads', function () {
         expect(sorter.worker.postMessage.callCount).to.equal(2);
     });
 
+    it('reuses a worker buffer within a partially occupied row and drops prior layout sizes', function () {
+        sorter.worker.postMessage = sinon.spy();
+        const layout = count => sorter.setSortParameters({ textureSize: 1536, totalActiveSplats: count });
+        layout(1537);
+        expect(sorter.bufferLength).to.equal(3072);
+        const partial = new Uint32Array(sorter.bufferLength);
+        sorter.releaseOrderData(partial);
+        layout(3000);
+        sorter.setSortParams([], true);
+        expect(sorter.worker.postMessage.lastCall.args[0].order).to.equal(partial.buffer);
+        layout(3073);
+        sorter.releaseOrderData(partial);
+        expect(sorter.availableOrderData).to.be.empty;
+        expect(sorter.bufferLength).to.equal(4608);
+        layout(0);
+        expect(sorter.bufferLength).to.equal(0);
+    });
+
+    it('uploads the live order rectangle and swaps after its final two rows', function () {
+        const work = world.workBuffer;
+        const width = 2048;
+        work.resize(width);
+        const upload = sinon.spy(work.uploadStream, 'upload');
+        const previous = new Uint32Array(width);
+        work.setOrderData(previous);
+        const previousTexture = work.orderTexture;
+        expect(previousTexture.height).to.equal(1);
+        expect(upload.lastCall.args).to.deep.equal([previous, previousTexture, 0, width]);
+        const count = 1026 * width - 13;
+        const order = new Uint32Array(Math.ceil(count / width) * width);
+        // The last live element sits before the padding in the final row.
+        order[count - 1] = 783;
+        expect(work.beginOrderUpload(order)).to.equal(true);
+        expect(work.stepOrderUpload()).to.equal(null);
+        expect(work.orderTexture).to.equal(previousTexture);
+        expect(upload.lastCall.args[3]).to.equal(1024 * width);
+        expect(work.stepOrderUpload()).to.equal(order);
+        expect(work.orderTexture).not.to.equal(previousTexture);
+        expect(work.orderTexture.height).to.equal(1026);
+        const [tail, texture, offset, elements] = upload.lastCall.args;
+        expect(texture).to.equal(work.orderTexture);
+        expect(offset).to.equal(1024 * width);
+        expect(elements).to.equal(2 * width);
+        expect(tail[count - 1 - offset]).to.equal(783);
+        work.setOrderData(new Uint32Array(0));
+        expect(upload.callCount).to.equal(3);
+    });
+
     it('does not sort a deferred old camera request against a replacement world layout', function () {
         sorter.worker.postMessage = sinon.spy();
         sorter.setSortParams([{ offset: 1 }], true);

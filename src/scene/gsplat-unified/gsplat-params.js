@@ -45,6 +45,16 @@ class GSplatParams {
     _material = new ShaderMaterial();
 
     /**
+     * Exact gsplatModifyVS source approved for WebGL coverage classification. Each call must read
+     * only its arguments, uniforms and per-splat inputs, and behave identically in the vertex and
+     * fragment stages. Replacing the shader requires registering the new source.
+     *
+     * @type {string|null}
+     * @ignore
+     */
+    coverageModifierGLSL = null;
+
+    /**
      * Format descriptor for work buffer streams.
      *
      * @type {GSplatFormat}
