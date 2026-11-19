@@ -4,6 +4,7 @@ import { UnifiedSortWorker } from './gsplat-unified-sort-worker.js';
 import { GSplatSortBinWeights } from './gsplat-sort-bin-weights.js';
 
 /**
+ * @import { Vec3 } from '../../core/math/vec3.js'
  * @import { GSplatInfo } from './gsplat-info.js'
  * @import { Scene } from '../scene.js'
  */
@@ -27,16 +28,20 @@ class GSplatUnifiedSorter extends EventHandler {
     /**
      * Latest camera request for the current layout while a worker sort is running.
      *
-     * @type {{ params: object[], radialSorting: boolean } | null}
+     * @type {{ params: object[], radialSorting: boolean, radialPosition: Vec3|null } | null}
      * @private
      */
     _deferredCamera = null;
+
+    // Worker results arrive in dispatch order, including jobs queued by layout changes.
+    /** @type {(Vec3|null)[]} */
+    _sentPositions = [];
 
     /**
      * Pending sorted result to be applied next frame. If multiple sorted results are received from
      * the worker, the latest result is stored here.
      *
-     * @type {{ count: number, version: number, orderData: Uint32Array }|null}
+     * @type {{ count: number, version: number, orderData: Uint32Array, radialPosition: Vec3|null }|null}
      */
     pendingSorted = null;
 
@@ -105,23 +110,24 @@ class GSplatUnifiedSorter extends EventHandler {
         this.pendingSorted = {
             count: msgData.count,
             version: msgData.version,
-            orderData: orderData
+            orderData: orderData,
+            radialPosition: this._sentPositions.shift() ?? null
         };
 
         // The camera may have come to rest while the worker was busy. Dispatch its latest
         // exact pose here; render-on-demand might never report another camera movement.
         if (this.jobsInFlight === 0 && this._deferredCamera) {
-            const { params, radialSorting } = this._deferredCamera;
-            this.setSortParams(params, radialSorting);
+            const { params, radialSorting, radialPosition } = this._deferredCamera;
+            this.setSortParams(params, radialSorting, radialPosition);
         }
     }
 
     applyPendingSorted() {
         if (this.pendingSorted) {
-            const { count, version, orderData } = this.pendingSorted;
+            const { count, version, orderData, radialPosition } = this.pendingSorted;
             this.pendingSorted = null;
             this._orderDataRetained = false;
-            this.fire('sorted', count, version, orderData);
+            this.fire('sorted', count, version, orderData, radialPosition);
 
             // reuse order data, unless the handler is still uploading from it
             if (!this._orderDataRetained) {
@@ -147,6 +153,7 @@ class GSplatUnifiedSorter extends EventHandler {
 
     destroy() {
         this._destroyed = true;
+        this._sentPositions.length = 0;
         this._deferredCamera = null;
         this.pendingSorted = null;
         this.worker.terminate();
@@ -247,8 +254,9 @@ class GSplatUnifiedSorter extends EventHandler {
      *
      * @param {object[]} params - The sorting parameters - per-splat directions, offsets, scales, AABBs.
      * @param {boolean} radialSorting - Whether to use radial distance sorting.
+     * @param {Vec3|null} [radialPosition] - World-space camera snapshot for a radial sort.
      */
-    setSortParams(params, radialSorting) {
+    setSortParams(params, radialSorting, radialPosition = null) {
 
         if (this.hasNewVersion || this.jobsInFlight === 0) {
             this._deferredCamera = null;
@@ -261,6 +269,7 @@ class GSplatUnifiedSorter extends EventHandler {
 
             // worker management
             this.jobsInFlight++;
+            this._sentPositions.push(radialPosition);
             this.hasNewVersion = false;
 
             // send job to worker
@@ -273,7 +282,7 @@ class GSplatUnifiedSorter extends EventHandler {
                 orderData.buffer
             ]);
         } else {
-            this._deferredCamera = { params, radialSorting };
+            this._deferredCamera = { params, radialSorting, radialPosition };
         }
     }
 }

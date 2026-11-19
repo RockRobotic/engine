@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 import sinon from 'sinon';
 
+import { Vec3 } from '../../../src/core/math/vec3.js';
 import { BoundingBox } from '../../../src/core/shape/bounding-box.js';
 import { NullGraphicsDevice } from '../../../src/platform/graphics/null/null-graphics-device.js';
 import { GraphNode } from '../../../src/scene/graph-node.js';
@@ -255,15 +256,18 @@ describe('GSplatManager CPU order uploads', function () {
         sorter.worker.postMessage = sinon.spy();
         const first = [{ offset: 1 }];
         const last = [{ offset: 3 }];
-        sorter.setSortParams(first, true);
-        sorter.setSortParams([{ offset: 2 }], true);
-        sorter.setSortParams(last, true);
+        const finalPose = new Vec3(3, 0, 0);
+        sorter.setSortParams(first, true, Vec3.ZERO);
+        sorter.setSortParams([{ offset: 2 }], true, new Vec3(2, 0, 0));
+        sorter.setSortParams(last, true, finalPose);
         expect(sorter.worker.postMessage.callCount).to.equal(1);
 
         sorter.onSorted({ count: 0, order: new ArrayBuffer(0), version: 0 });
+        expect(sorter.pendingSorted.radialPosition).to.equal(Vec3.ZERO);
         expect(sorter.worker.postMessage.callCount).to.equal(2);
         expect(sorter.worker.postMessage.lastCall.args[0].sortParams).to.equal(last);
         sorter.onSorted({ count: 0, order: new ArrayBuffer(0), version: 0 });
+        expect(sorter.pendingSorted.radialPosition).to.equal(finalPose);
         expect(sorter.jobsInFlight).to.equal(0);
         expect(sorter.worker.postMessage.callCount).to.equal(2);
     });
@@ -277,6 +281,42 @@ describe('GSplatManager CPU order uploads', function () {
         expect(sorter.worker.postMessage.callCount).to.equal(2);
         sorter.setSortParams([{ offset: 3 }], true);
         expect(sorter.worker.postMessage.lastCall.args[0].sortParams[0].offset).to.equal(3);
+    });
+
+    it('prioritizes a large current-layout radial order only for significantly better coverage or a settled camera', function () {
+        const state = newState(100);
+        sort(state);
+        frame();
+        manager.cameraNode.camera.nearClip = 0.1;
+        manager._boundRadialPosition = new Vec3(4, 0, 0);
+        const large = { byteLength: 128 * 1024 * 1024 };
+        const test = (pos, data = large, version = state.version) => manager._prioritizeCameraOrder(version, data, pos);
+        expect(test(new Vec3(1, 0, 0))).to.equal(true);
+        expect(test(new Vec3(3.9, 0, 0))).to.equal(false);
+        expect(test(new Vec3(7, 0, 0))).to.equal(false);
+        expect(test(new Vec3(1, 0, 0), { byteLength: 1024 })).to.equal(false);
+        expect(test(new Vec3(1, 0, 0), large, state.version + 1)).to.equal(false);
+        expect(test(null)).to.equal(false);
+        manager._boundRadialPosition = new Vec3(0.01, 0, 0);
+        expect(test(Vec3.ZERO)).to.equal(true);
+        sorter.jobsInFlight = 1;
+        expect(test(Vec3.ZERO)).to.equal(false);
+    });
+
+    it('preempts an unfinished same-layout order before applying the more relevant camera order', function () {
+        const state = newState(100);
+        sort(state);
+        frame();
+        const stale = sort(state);
+        frame();
+        expect(manager.hasPendingSort).to.equal(true);
+        const fresh = sort(state);
+        sinon.stub(manager, '_prioritizeCameraOrder').callsFake((version, data) => data === fresh);
+        frame();
+        expect(manager.hasPendingSort).to.equal(false);
+        expect(sorter.availableOrderData).to.include(stale);
+        expect(sorter.availableOrderData).to.include(fresh);
+        expect(drawnCount()).to.equal(100);
     });
 
     it('applies a resized order and a small order directly', function () {

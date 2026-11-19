@@ -14,7 +14,7 @@ bool initSource(out SplatSource source) {
         return false;
     }
 
-    ivec2 orderUV = ivec2(source.order % splatTextureSize, source.order / splatTextureSize);
+    ivec2 orderUV = splatTexel(source.order);
 
     // read splat id and initialize global splat for format read functions
     uint splatId = texelFetch(splatOrder, orderUV, 0).r;

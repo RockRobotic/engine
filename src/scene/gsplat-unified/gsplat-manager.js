@@ -173,8 +173,16 @@ class GSplatManager {
     /** @private */
     _markResult = { rebuilt: false, count: 0, textureSize: 0 };
 
-    /** @type {{version: number, count: number, orderData: Uint32Array}|null} */
+    /** @type {{version: number, count: number, orderData: Uint32Array, radialPosition: Vec3|null}|null} */
     _stagedSort = null;
+
+    /**
+     * World-space camera position for the CPU order currently bound for drawing.
+     *
+     * @type {Vec3|null}
+     * @private
+     */
+    _boundRadialPosition = null;
 
     // A fresh renderer or work buffer has no complete CPU order to keep on screen.
     _hasCpuOrder = false;
@@ -445,8 +453,8 @@ class GSplatManager {
     createSorter() {
         // create sorter
         const sorter = new GSplatUnifiedSorter(this.scene);
-        sorter.on('sorted', (count, version, orderData) => {
-            this.onSorted(count, version, orderData);
+        sorter.on('sorted', (count, version, orderData, radialPosition) => {
+            this.onSorted(count, version, orderData, radialPosition);
         });
         return sorter;
     }
@@ -551,14 +559,49 @@ class GSplatManager {
         this.world.reconcile(placements);
     }
 
-    onSorted(count, version, orderData) {
+    /**
+     * A long staged upload can leave nearby surfaces blending in the wrong order for seconds.
+     * An immediate upload is limited to very large radial orders for the same geometry layout.
+     * Use the near clip to express camera motion in scene units. Ordinary motion that has not
+     * accumulated significant error, directional sorting, and streaming keep their paced uploads.
+     *
+     * @param {number} version - Completed sort's world version.
+     * @param {Uint32Array} data - Completed new order.
+     * @param {Vec3|null} position - Camera position used by this sort.
+     * @returns {boolean} Whether to bind this order as soon as it can be drawn.
+     * @private
+     */
+    _prioritizeCameraOrder(version, data, position) {
+        if (!position || !this._hasCpuOrder || this.device.isWebGPU ||
+            version !== this.world.currentVersion || version !== this.world.lastWorldStateVersion ||
+            data.byteLength < 96 * 1024 * 1024) {
+            return false;
+        }
+        const current = this.cameraNode.getPosition();
+        const incomingError = current.distance(position);
+        if (incomingError <= 0.001 && !this.cpuSorter?.jobsInFlight) return true;
+
+        const near = this.cameraNode.camera?.nearClip ?? 0;
+        if (!this._boundRadialPosition || !Number.isFinite(near) || near <= 0) return false;
+        const displayedError = current.distance(this._boundRadialPosition);
+        return displayedError > 8 * near && displayedError - incomingError > 4 * near;
+    }
+
+    /**
+     * @param {number} count - Sorted splat count.
+     * @param {number} version - Matching world version.
+     * @param {Uint32Array} orderData - Sorted splat indices.
+     * @param {Vec3|null} [radialPosition] - Camera position used by a radial sort.
+     */
+    onSorted(count, version, orderData, radialPosition = null) {
         if (version < this._minSortVersion || !this.world.getState(version)) return;
 
-        if (this._hasCpuOrder && this.world.canStageOrder(version) && this.world.workBuffer.beginOrderUpload(orderData)) {
-            this._stagedSort = { count, version, orderData };
+        if (this._hasCpuOrder && this.world.canStageOrder(version) && !this._prioritizeCameraOrder(version, orderData, radialPosition) &&
+            this.world.workBuffer.beginOrderUpload(orderData)) {
+            this._stagedSort = { count, version, orderData, radialPosition };
             this.cpuSorter?.retainOrderData();
         } else {
-            this._commitCpuSort(count, version, orderData);
+            this._commitCpuSort(count, version, orderData, radialPosition);
         }
     }
 
@@ -569,14 +612,16 @@ class GSplatManager {
      * @param {number} count - Sorted splat count.
      * @param {number} version - Matching world version.
      * @param {Uint32Array} [orderData] - Order to upload immediately if it was not staged.
+     * @param {Vec3|null} [radialPosition] - Radial sort position when known.
      * @private
      */
-    _commitCpuSort(count, version, orderData) {
+    _commitCpuSort(count, version, orderData, radialPosition = null) {
         const result = this.world.markSorted(version, count, this.cameraNode, this.renderer.requiresBounds, this._markResult);
         if (orderData) this.world.workBuffer.setOrderData(orderData);
         if (result.rebuilt) this.renderer.update(result.count, result.textureSize);
         this.renderer.setOrderData();
         this._hasCpuOrder = count > 0;
+        this._boundRadialPosition = radialPosition;
     }
 
     /** @private */
@@ -602,9 +647,10 @@ class GSplatManager {
             const workBuffer = this.world.workBuffer;
             const pending = sorter.pendingSorted;
             if (workBuffer.orderUploadPending && this.world.canStageOrder(staged.version) &&
-                (!pending || this.world.canStageOrder(pending.version))) {
+                (!pending || (this.world.canStageOrder(pending.version) &&
+                    !this._prioritizeCameraOrder(pending.version, pending.orderData, pending.radialPosition)))) {
                 if (workBuffer.stepOrderUpload()) {
-                    this._commitCpuSort(staged.count, staged.version);
+                    this._commitCpuSort(staged.count, staged.version, undefined, staged.radialPosition);
                     sorter.releaseOrderData(staged.orderData);
                     this._stagedSort = null;
                 }
@@ -939,7 +985,7 @@ class GSplatManager {
             });
         });
 
-        this.cpuSorter.setSortParams(sorterRequest, radialSort);
+        this.cpuSorter.setSortParams(sorterRequest, radialSort, radialSort ? cameraPosition.clone() : null);
     }
 }
 
