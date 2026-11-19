@@ -117,6 +117,7 @@ class GSplatNearOrder {
             this.sorted = new Uint32Array(padded);
             this.ids = new Uint32Array(padded);
             this.keys = new Uint32Array(padded);
+            this.squaredDistances = new Float32Array(this.keys.buffer);
             this.xyz = new Float32Array(padded * 3);
         }
         // The worker can reclaim its full ArrayBuffer synchronously after this function.
@@ -181,13 +182,12 @@ class GSplatNearOrder {
         if (at !== this.length) return false;
         groups.push({ first: at, placement: null });
         this.groups = groups;
-        const count = GSplatSortBinWeights.bucketCount(this.state.totalActiveSplats);
+        const count = GSplatSortBinWeights.bucketCount(this.state.totalActiveSplats, true);
         if (count !== this.histogram?.length) this.histogram = new Uint32Array(count);
-        this.binWeights = this.weights.compute(GSplatSortBinWeights.NUM_BINS - 1, count);
         return true;
     }
 
-    sort(position) {
+    sort(position, nearClip) {
         let far = 0;
         for (const placement of this.placements) {
             const p = placement.inverse.transformPoint(position, placement.position);
@@ -198,15 +198,11 @@ class GSplatNearOrder {
             far = Math.max(far, Math.sqrt(x * x + y * y + z * z) * scale);
         }
         if (!(far > 0) || !Number.isFinite(far)) return false;
-        const { xyz, keys, histogram, groups, binWeights } = this;
-        const inv = GSplatSortBinWeights.NUM_BINS / far;
-        const numBins = GSplatSortBinWeights.NUM_BINS;
-        const last = binWeights[binWeights.length - 2] + binWeights[binWeights.length - 1];
+        const { xyz, keys, squaredDistances, histogram, groups } = this;
         histogram.fill(0);
-        let lo = histogram.length - 1;
-        let hi = 0;
         for (let g = 0; g < groups.length - 1; g++) {
             const { position: local, scale } = groups[g].placement;
+            const scaleSq = scale * scale;
             const x = local.x;
             const y = local.y;
             const z = local.z;
@@ -215,18 +211,12 @@ class GSplatNearOrder {
                 const dx = xyz[k] - x;
                 const dy = xyz[k + 1] - y;
                 const dz = xyz[k + 2] - z;
-                const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) * scale;
-                const d = (far - dist) * inv;
-                const bin = d >>> 0;
-                const key = bin === numBins ? last : (binWeights[bin * 2] + binWeights[bin * 2 + 1] * (d - bin)) >>> 0;
-                if (key >= histogram.length) return false;
-                keys[i] = key;
-                histogram[key]++;
-                lo = Math.min(lo, key);
-                hi = Math.max(hi, key);
+                squaredDistances[i] = (dx * dx + dy * dy + dz * dz) * scaleSq;
             }
         }
-        for (let i = lo + 1; i <= hi; i++) histogram[i] += histogram[i - 1];
+        const near = GSplatSortBinWeights.logNearDistance(nearClip, far);
+        this.weights.logSortKeys(near * near, far * far, keys, histogram, this.length);
+        for (let i = 1; i < histogram.length; i++) histogram[i] += histogram[i - 1];
         for (let i = 0; i < this.length; i++) this.sorted[--histogram[keys[i]]] = this.ids[i];
         return true;
     }
@@ -251,7 +241,7 @@ class GSplatNearOrder {
         }
         if (this.modified && position.distance(this.lastPosition) < 0.7 * near) return true;
         if (!this.prepared) this.prepared = this.prepare();
-        if (!this.prepared || !this.sort(position)) {
+        if (!this.prepared || !this.sort(position, near)) {
             this.restore(workBuffer);
             this.forget();
             return false;

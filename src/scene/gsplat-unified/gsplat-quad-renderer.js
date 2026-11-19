@@ -28,7 +28,7 @@ const coverageChunks = [
     'gsplatSourceVS', 'gsplatCenterVS', 'gsplatCornerVS', 'gsplatOutputVS', 'gsplatModifyPS',
     'sceneTexturesPS', 'decodePS', 'fogPS', 'gammaPS', 'tonemappingPS', 'tonemappingNonePS',
     'tonemappingFilmicPS', 'tonemappingLinearPS', 'tonemappingHejlPS', 'tonemappingAcesPS',
-    'tonemappingAces2PS', 'tonemappingNeutralPS'
+    'tonemappingAces2PS', 'tonemappingNeutralPS', 'tonemappingAgxPS'
 ].map(name => [name, gsplatChunksGLSL[name] ?? shaderChunksGLSL[name]]);
 
 /**
@@ -51,6 +51,12 @@ class GSplatQuadRenderer extends GSplatRenderer {
 
     /** @private */
     _lastFisheyeEnabled = false;
+
+    /** @private */
+    _lastAntiAlias = false;
+
+    /** @private */
+    _lastAntiAliasMixed = false;
 
     /** @private */
     _lastSourceChunksKey = '';
@@ -96,6 +102,8 @@ class GSplatQuadRenderer extends GSplatRenderer {
         this._internalDefines.add('GSPLAT_SEPARATE_OPACITY');
         this._internalDefines.add('GSPLAT_FISHEYE');
         this._internalDefines.add('GSPLAT_GL_COVERAGE');
+        this._internalDefines.add('GSPLAT_AA');
+        this._internalDefines.add('GSPLAT_AA_MIXED');
         this._internalDefines.add('GSPLAT_NO_FOG');
         this._internalDefines.add('GSPLAT_NO_TONEMAP');
         this._internalDefines.add('GSPLAT_OVERDRAW');
@@ -117,8 +125,8 @@ class GSplatQuadRenderer extends GSplatRenderer {
         const isForward = (renderMode & GSPLAT_FORWARD) !== 0;
         const isShadow = (renderMode & GSPLAT_SHADOW) !== 0;
 
-        // Update mesh instance castShadow state FIRST, before adding to arrays
-        this.meshInstance.castShadow = isShadow;
+        // Update mesh instance castShadows state FIRST, before adding to arrays
+        this.meshInstance.castShadows = isShadow;
 
         // Remove from old arrays if needed
         if (wasForward && !isForward) {
@@ -335,6 +343,16 @@ class GSplatQuadRenderer extends GSplatRenderer {
             return false;
         }
         return coverageChunks.every(([name, code]) => deviceChunks.get(name) === code);
+    }
+
+    setAntiAlias(antiAlias, mixed) {
+        if (antiAlias !== this._lastAntiAlias || mixed !== this._lastAntiAliasMixed) {
+            this._lastAntiAlias = antiAlias;
+            this._lastAntiAliasMixed = mixed;
+            this._material.setDefine('GSPLAT_AA', antiAlias);
+            this._material.setDefine('GSPLAT_AA_MIXED', mixed);
+            this._material.update();
+        }
     }
 
     frameUpdate(params) {

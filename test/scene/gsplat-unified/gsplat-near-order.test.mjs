@@ -38,7 +38,7 @@ describe('GSplat current-camera near order', function () {
         const state = { textureSize: width, totalActiveSplats: n, splats };
         let send;
         let result;
-        runInNewContext(`(${UnifiedSortWorker.toString()})();`, {
+        runInNewContext(`(${UnifiedSortWorker.toString()})(self);`, {
             GSplatSortBinWeights,
             performance,
             self: {
@@ -70,7 +70,7 @@ describe('GSplat current-camera near order', function () {
                 };
             });
             const order = new Uint32Array(width * texture.height).fill(0xffffffff);
-            send({ command: 'sort', order: order.buffer, radialSorting: true, sortParams });
+            send({ command: 'sort', order: order.buffer, radialSorting: true, nearClip: near, sortParams });
             return new Uint32Array(result.order);
         };
         const original = sort(origin);

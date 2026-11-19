@@ -15,6 +15,18 @@ describe('WebGPU splat coverage', function () {
         expect(result).to.include('_pcCopyInputs(bounds);');
     });
 
+    it('reads the instance index in each vertex entry point', function () {
+        const code = [
+            '@vertex fn vertexMain(quad: VertexInput) -> VertexOutput { return vertex(); }',
+            '@vertex fn alternateMain(other: VertexInput) -> VertexOutput { return vertex(); }'
+        ].join('\n');
+        const result = WebgpuShaderProcessorWGSL.copyInputs(code, {}, [
+            { pcName: 'pcInstanceIndex', wgslName: 'instanceIndex' }
+        ]);
+        expect(result).to.include('_pcCopyInputs(quad);\n    pcInstanceIndex = quad.instanceIndex;');
+        expect(result).to.include('_pcCopyInputs(other);\n    pcInstanceIndex = other.instanceIndex;');
+    });
+
     it('leaves other render passes and custom mesh layouts on the regular draw path', function () {
         const device = { splatCoveragePass: false, depthState: { write: false }, _coverageBindings: [] };
         const coverage = new WebgpuSplatCoverage(device);

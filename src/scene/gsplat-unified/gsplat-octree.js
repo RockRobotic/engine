@@ -1,5 +1,5 @@
 import { GSplatOctreeNode } from './gsplat-octree-node.js';
-import { GSplatLodTable } from './gsplat-lod-table.js';
+import { buildLcc2Tree, buildLodTree } from './gsplat-lod-tree.js';
 import { path } from '../../core/path.js';
 import { Debug } from '../../core/debug.js';
 import { Tracing } from '../../core/tracing.js';
@@ -18,6 +18,15 @@ const _requestPriority = new Map();
  * @import { GSplatAssetLoaderBase } from './gsplat-asset-loader-base.js'
  */
 
+/**
+ * The level of detail tree of a streamed GSplat. Every node holds a single LOD level of its region,
+ * as a range of splats in one of the octree's files, and is replaced by its children when more
+ * detail is needed - the children together cover the same region at the next finer level. A
+ * manifest holding its data in the leaves of its octree only, each leaf with every LOD level of its
+ * region, is reorganized into such a tree on creation, see buildLodTree.
+ *
+ * @ignore
+ */
 class GSplatOctree {
     /**
      * @type {GSplatOctreeNode[]}
@@ -34,16 +43,63 @@ class GSplatOctree {
     nodeBoundsMinMax;
 
     /**
-     * Per node, how far its half extents exceed the octree's typical node on each axis - zero on
-     * any axis where the node is no larger. Length is {@link GSplatOctree.nodes}.length * 3,
-     * `[x, y, z]` per node. The typical node is the median half extent on each axis, so it follows
-     * the content: a node standing out from its neighbours in size, such as a sparse region the
-     * generator left as one wide node, has an excess, while ordinary nodes have none. The distance
-     * pass trims only this excess - see GSplatParams#lodDistanceShrink.
+     * Index of each node's parent node, -1 for the top level nodes. Nodes are stored breadth first,
+     * so a parent always precedes its children and the children of a node are contiguous.
      *
-     * @type {Float32Array}
+     * @type {Int32Array}
      */
-    nodeBoundsExcess;
+    parentIndex;
+
+    /**
+     * Index of each node's first child, valid when {@link GSplatOctree#childCount} is not zero.
+     *
+     * @type {Int32Array}
+     */
+    childStart;
+
+    /**
+     * Number of children of each node, zero for the leaves.
+     *
+     * @type {Int32Array}
+     */
+    childCount;
+
+    /**
+     * The single LOD level each node holds data for.
+     *
+     * @type {Int16Array}
+     */
+    nodeLevel;
+
+    /**
+     * Per node, the splat count of its own level and the summed splat counts of its children's
+     * levels, for choosing a cut without visiting the children.
+     *
+     * @type {Float64Array}
+     */
+    nodeSplats;
+
+    /**
+     * @type {Float64Array}
+     */
+    childrenSplats;
+
+    /**
+     * Per node, how many nodes of its subtree, itself included, can render right now - their data
+     * is loaded, or they have none. A subtree with none has nothing loaded to fall back on, which
+     * lets a walk skip it without visiting it. Kept up to date as files load and unload.
+     *
+     * @type {Int32Array}
+     */
+    loadedBelow;
+
+    /**
+     * Per file, the nodes whose data it holds.
+     *
+     * @type {number[][]}
+     * @private
+     */
+    _fileNodes;
 
     /**
      * @type {{ url: string, lodLevel: number }[]}
@@ -55,20 +111,16 @@ class GSplatOctree {
      */
     lodLevels;
 
-    /**
-     * Precomputed LOD selection tables, keyed by the LOD range they were built for and shared by
-     * every instance of this octree using that range.
-     *
-     * `lodRangeMin`/`lodRangeMax` are per placement, so instances of one octree may legitimately
-     * differ and each live range needs its own table - holding only the most recent would rebuild
-     * on every request. Entries are reference counted by the instances holding them and dropped at
-     * zero, so nothing is retained for a range that has fallen out of use, and nothing still in use
-     * can be evicted.
-     *
-     * @type {Map<string, GSplatLodTable>}
-     * @private
-     */
-    _lodTables = new Map();
+    /** Source manifest layout, before conversion to the runtime hierarchy. @type {'flat'|'tree'} */
+    hierarchyMode;
+
+    /** LCC2 scene metadata, or null for manifests that omit it. @type {object|null} */
+    metadata;
+
+    /** Number of authored LOD levels. @type {number} */
+    get totalLevels() {
+        return this.lodLevels;
+    }
 
     /**
      * The file URL of the container asset, used as the base for resolving relative URLs.
@@ -148,6 +200,15 @@ class GSplatOctree {
     environmentRefCount = 0;
 
     /**
+     * Whether the splats were trained with anti-aliasing. Applies to every file resource and the
+     * environment resource, whatever their own files say.
+     *
+     * @type {boolean}
+     * @private
+     */
+    _antiAlias = false;
+
+    /**
      * Asset loader used for loading/unloading resources.
      *
      * @type {GSplatAssetLoaderBase|null}
@@ -167,42 +228,19 @@ class GSplatOctree {
     cooldownTicks = 100;
 
     /**
-     * Hierarchy mode. `"flat"` (default) uses leaf-only LoD pyramids; `"tree"`
-     * retains every LCC2 node with a single LoD each and the tree structure.
-     *
-     * @type {"flat" | "tree"}
-     */
-    hierarchyMode = 'flat';
-
-    /**
-     * Index of the root node in `nodes[]`. Only populated in tree mode.
-     * @type {number}
-     */
-    rootIndex = -1;
-
-    /**
-     * Total authored LoD levels (max tree depth in tree mode; `lodLevels` in flat mode).
-     * @type {number}
-     */
-    totalLevels = 0;
-
-    /**
-     * Scene-level metadata from LCC2 (virtualLoD, lodSplats, etc.) — pass-through only.
-     * @type {Object|null}
-     */
-    metadata = null;
-
-    /**
      * @param {string} assetFileUrl - The file URL of the container asset.
      * @param {Object} data - The parsed JSON data containing info, filenames and tree.
      */
     constructor(assetFileUrl, data) {
 
+        // Applications can also supply manifests already translated by the older LCC2 parser.
+        if (data.hierarchyMode === 'tree' && !data.hierarchical) {
+            data = buildLcc2Tree(data);
+        }
+        this.hierarchyMode = data.hierarchyMode ?? 'flat';
+        this.metadata = data.metadata ?? null;
         this.lodLevels = data.lodLevels;
         this.assetFileUrl = assetFileUrl;
-        this.hierarchyMode = data.hierarchyMode ?? 'flat';
-        this.totalLevels = data.totalLevels ?? data.lodLevels;
-        this.metadata = data.metadata ?? null;
 
         // expand all file paths to full URLs upfront to avoid repeated joins later
         const baseDir = path.getDirectory(assetFileUrl);
@@ -221,15 +259,13 @@ class GSplatOctree {
                 data.environment;
         }
 
-        // Extract leaf nodes from hierarchical tree structure
-        // (flat mode only - tree mode keeps every node, see below)
-        const leafNodes = [];
-        if (this.hierarchyMode !== 'tree') {
-            this._extractLeafNodes(data.tree, leafNodes);
-        }
+        // the nodes below the root of the tree, a manifest holding its data in the leaves only
+        // reorganized into a tree first
+        const nodesData = [];
+        this._extractHierarchy((data.hierarchical ? data : buildLodTree(data)).tree, nodesData);
 
-        // Create nodes from the extracted leaf nodes
-        this.nodes = leafNodes.map((nodeData) => {
+        // Create nodes from the extracted node data
+        this.nodes = nodesData.map((nodeData) => {
             /** @type {GSplatOctreeNodeLod[]} */
             const lods = [];
 
@@ -241,7 +277,7 @@ class GSplatOctree {
                         file: this.files[lodData.file].url || '',
                         // A level listed with no splats has nothing to load: give it no file, the
                         // same as a level the manifest omits, so nothing downstream places or
-                        // fetches it (see GSplatLodTable's empty level).
+                        // fetches it.
                         fileIndex: (lodData.count || 0) > 0 ? lodData.file : -1,
                         offset: lodData.offset || 0,
                         count: lodData.count || 0
@@ -263,12 +299,6 @@ class GSplatOctree {
             return new GSplatOctreeNode(lods, nodeData.bound);
         });
 
-        // Tree mode (LCC2): retain every node of the hierarchy, with a single LoD entry each.
-        if (this.hierarchyMode === 'tree') {
-            this.nodes = [];
-            this.rootIndex = this._buildTree(data.tree, -1);
-        }
-
         // precompute node bounds for CPU hot paths
         const nodeCount = this.nodes.length;
         const boundsFlat = new Float32Array(nodeCount * 6);
@@ -286,38 +316,70 @@ class GSplatOctree {
         }
         this.nodeBoundsMinMax = boundsFlat;
 
-        // Tree mode keeps interior nodes, whose bounds enclose their children's. Shrinking them
-        // towards their centers would judge a parent further away than the children it contains,
-        // so the tree walk would stop descending right where the camera is - no excess there.
-        this.nodeBoundsExcess = this.hierarchyMode === 'tree' ?
-            new Float32Array(nodeCount * 3) :
-            GSplatOctree._computeBoundsExcess(boundsFlat, nodeCount);
+        this._initHierarchyCounts();
     }
 
     /**
-     * Computes {@link GSplatOctree#nodeBoundsExcess} from packed node bounds.
+     * Fills the per-node counts.
      *
-     * @param {Float32Array} boundsFlat - Packed per-node bounds, see nodeBoundsMinMax.
-     * @param {number} nodeCount - Number of nodes.
-     * @returns {Float32Array} The per-node, per-axis excess over the median half extent.
      * @private
      */
-    static _computeBoundsExcess(boundsFlat, nodeCount) {
-        const excess = new Float32Array(nodeCount * 3);
-        if (nodeCount === 0) return excess;
+    _initHierarchyCounts() {
+        const { nodes, parentIndex, childStart, childCount, nodeLevel } = this;
+        const nodeCount = nodes.length;
+        const own = new Float64Array(nodeCount);
+        const children = new Float64Array(nodeCount);
+        const loadedBelow = new Int32Array(nodeCount);
+        const fileNodes = this.files.map(() => []);
 
-        const half = new Float32Array(nodeCount);
-        for (let axis = 0; axis < 3; axis++) {
-            for (let i = 0; i < nodeCount; i++) {
-                half[i] = (boundsFlat[i * 6 + 3 + axis] - boundsFlat[i * 6 + axis]) * 0.5;
-            }
-            const sorted = half.slice().sort();
-            const typical = sorted[nodeCount >> 1];
-            for (let i = 0; i < nodeCount; i++) {
-                excess[i * 3 + axis] = Math.max(0, half[i] - typical);
+        for (let n = 0; n < nodeCount; n++) {
+            const lod = nodes[n].lods[nodeLevel[n]];
+            own[n] = lod.count;
+            if (lod.fileIndex >= 0) {
+                fileNodes[lod.fileIndex].push(n);
             }
         }
-        return excess;
+
+        // children are stored after their parent, so a reverse pass sees a subtree before its root
+        for (let n = nodeCount - 1; n >= 0; n--) {
+            for (let c = childStart[n], end = c + childCount[n]; c < end; c++) {
+                children[n] += own[c];
+            }
+
+            // a node with no data needs nothing loaded to render
+            if (nodes[n].lods[nodeLevel[n]].fileIndex < 0) {
+                loadedBelow[n]++;
+            }
+            const parent = parentIndex[n];
+            if (parent >= 0) {
+                loadedBelow[parent] += loadedBelow[n];
+            }
+        }
+
+        this.nodeSplats = own;
+        this.childrenSplats = children;
+        this.loadedBelow = loadedBelow;
+        this._fileNodes = fileNodes;
+    }
+
+    /**
+     * Updates {@link GSplatOctree#loadedBelow} for a file that loaded or unloaded.
+     *
+     * @param {number} fileIndex - The file index.
+     * @param {number} delta - 1 when the file loaded, -1 when it unloaded.
+     * @private
+     */
+    _updateLoadedBelow(fileIndex, delta) {
+        const fileNodes = this._fileNodes;
+        if (!fileNodes) return;
+
+        const { parentIndex, loadedBelow } = this;
+        const list = fileNodes[fileIndex];
+        for (let i = 0; i < list.length; i++) {
+            for (let n = list[i]; n >= 0; n = parentIndex[n]) {
+                loadedBelow[n] += delta;
+            }
+        }
     }
 
     /**
@@ -330,7 +392,6 @@ class GSplatOctree {
         this.destroyed = true;
 
         // Clear internal state
-        this._lodTables.clear();
         this.fileResources.clear();
         this.cooldowns.clear();
         this._requesters.clear();
@@ -365,106 +426,46 @@ class GSplatOctree {
     }
 
     /**
-     * Recursively builds the tree-mode node list. Appends nodes to `this.nodes` in
-     * DFS order and returns the index of the just-added node.
+     * Extracts every node below the root of the tree, breadth first, and fills in the hierarchy
+     * arrays. The root holds no data, its children are the top level nodes. Each node
+     * carries its `level`, the single LOD level of its `lods`.
      *
-     * @param {Object} nodeData - A tree node from the translated LCC2 JSON.
-     * @param {number} parentIndex - Index of the parent node, or -1 for root.
-     * @returns {number} Index of this node in `this.nodes`.
+     * @param {Object} tree - The root of the tree.
+     * @param {Array} nodes - Array to collect the nodes.
      * @private
      */
-    _buildTree(nodeData, parentIndex) {
-        // Build a single LoD entry per node. Null lod → invisible sentinel.
-        const lodData = nodeData.lod;
-        /** @type {GSplatOctreeNodeLod[]} */
-        const lods = [{
-            file: lodData ? (this.files[lodData.file]?.url || '') : '',
-            // a node with no splats has nothing to load, same as a flat-mode level with no data
-            fileIndex: lodData && (lodData.count || 0) > 0 ? lodData.file : -1,
-            offset: lodData ? (lodData.offset || 0) : 0,
-            count: lodData ? (lodData.count || 0) : 0
-        }];
-        if (lodData && this.files[lodData.file]) {
-            this.files[lodData.file].lodLevel = nodeData.depth;
+    _extractHierarchy(tree, nodes) {
+        const parents = [];
+        const starts = [];
+        const counts = [];
+        const levels = [];
+
+        for (const child of tree.children ?? []) {
+            nodes.push(child);
+            parents.push(-1);
         }
 
-        const node = new GSplatOctreeNode(lods, nodeData.bound);
-        node.depth = nodeData.depth ?? 0;
-        node.parent = parentIndex;
-
-        const myIndex = this.nodes.length;
-        this.nodes.push(node);
-
-        const childIndices = [];
-        const children = nodeData.children ?? [];
-        for (const child of children) {
-            childIndices.push(this._buildTree(child, myIndex));
-        }
-        node.children = childIndices;
-
-        return myIndex;
-    }
-
-    /**
-     * Takes a reference to the LOD selection table for a LOD range, building it on first use. The
-     * caller must pass it back to {@link GSplatOctree#releaseLodTable} when it stops using it.
-     *
-     * The table has to be per range, because the range decides how bands past a node's data, and
-     * gaps in it, resolve.
-     *
-     * @param {number} rangeMin - Finest allowed LOD index.
-     * @param {number} rangeMax - Coarsest allowed LOD index.
-     * @returns {GSplatLodTable} The selection table, with its reference count incremented.
-     */
-    acquireLodTable(rangeMin, rangeMax) {
-        // A string key rather than packed arithmetic: nothing bounds lodLevels or the configured
-        // range, and a packed key would alias pairs once rangeMax passes the pack base, silently
-        // handing an instance a table for the wrong range.
-        const key = `${rangeMin},${rangeMax}`;
-        let table = this._lodTables.get(key);
-        if (!table) {
-            table = new GSplatLodTable(this, rangeMin, rangeMax);
-            this._lodTables.set(key, table);
-        }
-        table.refCount++;
-        return table;
-    }
-
-    /**
-     * Releases a reference taken by {@link GSplatOctree#acquireLodTable}, dropping the table once
-     * no instance holds it.
-     *
-     * @param {GSplatLodTable|null} table - The table to release. Null is ignored, so callers can
-     * release unconditionally.
-     */
-    releaseLodTable(table) {
-        if (!table) return;
-        Debug.assert(table.refCount > 0, `GSplatOctree: releasing a LOD table for range [${table.rangeMin}, ${table.rangeMax}] that holds no references.`);
-        if (--table.refCount <= 0) {
-            this._lodTables.delete(`${table.rangeMin},${table.rangeMax}`);
-        }
-    }
-
-    /**
-     * Recursively extracts leaf nodes (nodes with 'lods' property) from the hierarchical tree.
-     *
-     * @param {Object} node - The current tree node to process.
-     * @param {Array} leafNodes - Array to collect leaf nodes.
-     * @private
-     */
-    _extractLeafNodes(node, leafNodes) {
-        if (node.lods) {
-            // This is a leaf node with LOD data
-            leafNodes.push({
-                lods: node.lods,
-                bound: node.bound
-            });
-        } else if (node.children) {
-            // This is a branch node, recurse into children
-            for (const child of node.children) {
-                this._extractLeafNodes(child, leafNodes);
+        for (let i = 0; i < nodes.length; i++) {
+            const node = nodes[i];
+            const children = node.children ?? [];
+            starts.push(nodes.length);
+            counts.push(children.length);
+            levels.push(node.level);
+            for (const child of children) {
+                nodes.push(child);
+                parents.push(i);
             }
         }
+
+        // the node data is read as the leaf node data of a flat tree
+        for (let i = 0; i < nodes.length; i++) {
+            nodes[i] = { lods: nodes[i].lods ?? {}, bound: nodes[i].bound };
+        }
+
+        this.parentIndex = Int32Array.from(parents);
+        this.childStart = Int32Array.from(starts);
+        this.childCount = Int32Array.from(counts);
+        this.nodeLevel = Int16Array.from(levels);
     }
 
     getFileResource(fileIndex) {
@@ -534,6 +535,7 @@ class GSplatOctree {
         // Clean up loaded resource if present
         if (this.fileResources.has(fileIndex)) {
             this.fileResources.delete(fileIndex);
+            this._updateLoadedBelow(fileIndex, -1);
 
             // trace updated LOD counts after change
             this._traceLodCounts();
@@ -581,6 +583,31 @@ class GSplatOctree {
     }
 
     /**
+     * Sets whether the splats were trained with anti-aliasing, for the loaded resources and the
+     * ones still to load.
+     *
+     * @type {boolean}
+     */
+    set antiAlias(value) {
+        this._antiAlias = value;
+        for (const res of this.fileResources.values()) {
+            res.antiAlias = value;
+        }
+        if (this.environmentResource) {
+            this.environmentResource.antiAlias = value;
+        }
+    }
+
+    /**
+     * Gets whether the splats were trained with anti-aliasing.
+     *
+     * @type {boolean}
+     */
+    get antiAlias() {
+        return this._antiAlias;
+    }
+
+    /**
      * Checks whether a file has finished loading, and stores its resource if so.
      *
      * @param {number} fileIndex - The index of the file in the `files` array.
@@ -602,7 +629,9 @@ class GSplatOctree {
         // Check if the resource is now available from the asset loader
         const res = this.assetLoader.getResource(this.files[fileIndex].url);
         if (res) {
+            res.antiAlias = this._antiAlias;
             this.fileResources.set(fileIndex, res);
+            this._updateLoadedBelow(fileIndex, 1);
 
             // The octree fully re-creates these resources on device loss, so the CPU-side
             // ImageBitmap sources retained on the textures are not needed for re-upload.
@@ -836,6 +865,7 @@ class GSplatOctree {
         // Check if the resource is now available from the asset loader
         const res = this.assetLoader.getResource(this.environmentUrl);
         if (res) {
+            res.antiAlias = this._antiAlias;
             this.environmentResource = res;
 
             // if loaded but not needed, immediately unload

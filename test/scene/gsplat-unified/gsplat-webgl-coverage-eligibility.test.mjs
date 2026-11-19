@@ -44,13 +44,16 @@ describe('GSplatQuadRenderer WebGL coverage eligibility', function () {
         return renderer.material.getDefine('GSPLAT_GL_COVERAGE');
     };
 
-    it('accepts the built-in compact and packed readers, including antialiasing', function () {
+    it('accepts the built-in compact and packed readers, including mixed antialiasing', function () {
         expect(usesCoverage()).to.equal(true);
         params.dataFormat = GSPLATDATA_LARGE;
         renderer.workBuffer.format = params.format;
         renderer.onWorkBufferFormatChanged();
-        params.antiAlias = true;
+        // The manager resolves these flags from the resources and sets them before frameUpdate.
+        renderer.setAntiAlias(true, true);
         expect(usesCoverage()).to.equal(true);
+        expect(renderer.material.getDefine('GSPLAT_AA')).to.equal(true);
+        expect(renderer.material.getDefine('GSPLAT_AA_MIXED')).to.equal(true);
     });
 
     it('requires the exact registered source after each material shader change', function () {
@@ -73,6 +76,10 @@ describe('GSplatQuadRenderer WebGL coverage eligibility', function () {
         deviceChunks.set('gsplatQuatToMat3VS', `${gsplatChunksGLSL.gsplatQuatToMat3VS}\n`);
         expect(usesCoverage()).to.equal(false);
         deviceChunks.set('gsplatQuatToMat3VS', gsplatChunksGLSL.gsplatQuatToMat3VS);
+        expect(usesCoverage()).to.equal(true);
+        deviceChunks.set('tonemappingAgxPS', `${shaderChunksGLSL.tonemappingAgxPS}\n`);
+        expect(usesCoverage()).to.equal(false);
+        deviceChunks.set('tonemappingAgxPS', shaderChunksGLSL.tonemappingAgxPS);
         expect(usesCoverage()).to.equal(true);
         renderer.material.getShaderChunks('glsl').set('gsplatReadVS', 'vec3 getCenter() { return vec3(0); }');
         expect(usesCoverage()).to.equal(false);

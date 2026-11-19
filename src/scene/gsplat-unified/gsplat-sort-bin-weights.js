@@ -18,9 +18,13 @@ class GSplatSortBinWeights {
         return 32;
     }
 
-    static bucketCount(count) {
-        const compareBits = Math.max(10, Math.min(20, Math.round(Math.log2(count / 4))));
+    static bucketCount(count, logKeys) {
+        const compareBits = logKeys ? 16 : Math.max(10, Math.min(20, Math.round(Math.log2(count / 4))));
         return 2 ** compareBits + 1;
+    }
+
+    static logNearDistance(nearClip, maxDist) {
+        return (nearClip > 0 ? nearClip : maxDist * 1e-6) / 1024;
     }
 
     /**
@@ -50,6 +54,8 @@ class GSplatSortBinWeights {
     constructor() {
         const numBins = GSplatSortBinWeights.NUM_BINS;
         const weightTiers = GSplatSortBinWeights.WEIGHT_TIERS;
+        this.floatValue = new Float32Array(1);
+        this.intValue = new Int32Array(this.floatValue.buffer);
 
         /** @type {Float32Array} Interleaved [base0, divider0, base1, divider1, ...]. */
         this.binWeights = new Float32Array(numBins * 2);
@@ -77,21 +83,43 @@ class GSplatSortBinWeights {
         this.lastBucketCount = -1;
     }
 
+    floatBits(value) {
+        this.floatValue[0] = value;
+        return this.intValue[0];
+    }
+
+    // Turns the distances written as floats over the key buffer into sort keys spaced by log
+    // distance, in place (same as the projector shader). A positive float's bit pattern grows with
+    // its value almost exactly as its log2, so keys taken from the bits give every doubling of
+    // distance the same number of keys, and splats far away cost no precision near the camera. The
+    // bits are measured from those of `nearValue`, and inverted so far splats sort first. Writing
+    // all the distances first costs less than reading the bits back a splat at a time.
+    logSortKeys(nearValue, farValue, distances, countBuffer, count = distances.length) {
+        const maxKey = countBuffer.length - 1;
+        const minBits = this.floatBits(nearValue);
+        const bitsRange = this.floatBits(farValue) - minBits;
+        const keyScale = bitsRange > 0 ? maxKey / bitsRange : 0;
+
+        for (let i = 0; i < count; i++) {
+            const keyFromNear = (distances[i] - minBits) * keyScale;
+            const sortKey = maxKey - (keyFromNear <= 0 ? 0 : (keyFromNear >= maxKey ? maxKey : keyFromNear >>> 0));
+            distances[i] = sortKey;
+            countBuffer[sortKey]++;
+        }
+    }
+
     /**
-     * Computes the camera bin index based on sort mode and distance range.
+     * Computes the camera bin index from the distance range of a linear sort. Only the depth sort
+     * of an orthographic or fisheye camera uses the bins; the other sort keys are spaced by log
+     * distance.
      *
-     * @param {boolean} radialSort - Whether using radial sort mode.
      * @param {number} minDist - Minimum distance.
      * @param {number} range - Distance range (maxDist - minDist).
      * @returns {number} The camera bin index (0 to NUM_BINS-1).
      */
-    static computeCameraBin(radialSort, minDist, range) {
+    static computeCameraBin(minDist, range) {
         const numBins = GSplatSortBinWeights.NUM_BINS;
-        if (radialSort) {
-            // For radial sort with inverted distances, camera (dist=0) maps to the last bin
-            return numBins - 1;
-        }
-        // For linear sort, calculate where camera falls in the projected distance range
+        // calculate where camera falls in the projected distance range
         const cameraOffsetFromRangeStart = -minDist;
         const cameraBinFloat = (cameraOffsetFromRangeStart / range) * numBins;
         return Math.max(0, Math.min(numBins - 1, Math.floor(cameraBinFloat)));

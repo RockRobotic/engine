@@ -257,9 +257,9 @@ describe('GSplatManager CPU order uploads', function () {
         const first = [{ offset: 1 }];
         const last = [{ offset: 3 }];
         const finalPose = new Vec3(3, 0, 0);
-        sorter.setSortParams(first, true, Vec3.ZERO);
-        sorter.setSortParams([{ offset: 2 }], true, new Vec3(2, 0, 0));
-        sorter.setSortParams(last, true, finalPose);
+        sorter.setSortParams(first, true, 0.1, false, Vec3.ZERO);
+        sorter.setSortParams([{ offset: 2 }], true, 0.1, false, new Vec3(2, 0, 0));
+        sorter.setSortParams(last, true, 0.1, false, finalPose);
         expect(sorter.worker.postMessage.callCount).to.equal(1);
 
         sorter.onSorted({ count: 0, order: new ArrayBuffer(0), version: 0 });
@@ -280,7 +280,7 @@ describe('GSplatManager CPU order uploads', function () {
         const partial = new Uint32Array(sorter.bufferLength);
         sorter.releaseOrderData(partial);
         layout(3000);
-        sorter.setSortParams([], true);
+        sorter.setSortParams([], true, 0.1, false);
         expect(sorter.worker.postMessage.lastCall.args[0].order).to.equal(partial.buffer);
         layout(3073);
         sorter.releaseOrderData(partial);
@@ -322,12 +322,12 @@ describe('GSplatManager CPU order uploads', function () {
 
     it('does not sort a deferred old camera request against a replacement world layout', function () {
         sorter.worker.postMessage = sinon.spy();
-        sorter.setSortParams([{ offset: 1 }], true);
-        sorter.setSortParams([{ offset: 2 }], true);
+        sorter.setSortParams([{ offset: 1 }], true, 0.1, false);
+        sorter.setSortParams([{ offset: 2 }], true, 0.1, false);
         sorter.setSortParameters({ textureSize: 4 });
         sorter.onSorted({ count: 0, order: new ArrayBuffer(0), version: 0 });
         expect(sorter.worker.postMessage.callCount).to.equal(2);
-        sorter.setSortParams([{ offset: 3 }], true);
+        sorter.setSortParams([{ offset: 3 }], true, 0.1, false);
         expect(sorter.worker.postMessage.lastCall.args[0].sortParams[0].offset).to.equal(3);
     });
 
