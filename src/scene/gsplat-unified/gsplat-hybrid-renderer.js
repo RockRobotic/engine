@@ -575,7 +575,7 @@ class GSplatHybridRenderer extends GSplatRenderer {
             this.indirectDispatchSlot + 1,
             /** @type {StorageBuffer} */ (ic.sortElementCountBuffer),
             undefined,
-            false,
+            true, // the rasterizer reads only sorted indices
             true  // destructiveKeys: projector overwrites sortKeys each frame before the sort
         );
     }

@@ -42,14 +42,29 @@ class WebgpuSplatCoverage {
 
     instanceSize = 0;
 
-    /** @type {WeakMap<GPURenderPipeline, {front: GPURenderPipeline, resolve: GPURenderPipeline}>} */
+    /**
+     * @type {WeakMap<GPURenderPipeline, {front: GPURenderPipeline, resolve: GPURenderPipeline}>}
+     * @private
+     */
     renderPipelines = new WeakMap();
 
-    /** @type {GPUComputePipeline[]} */
+    /**
+     * @type {GPUComputePipeline[]}
+     * @private
+     */
     computes = [];
 
-    /** @type {Array<GPUTexture|GPUBuffer>} */
+    /**
+     * @type {Array<GPUTexture|GPUBuffer>}
+     * @private
+     */
     owned = [];
+
+    storageBytes = 0;
+
+    uniformBytes = 0;
+
+    textureBytes = 0;
 
     resources = null;
 
@@ -69,6 +84,12 @@ class WebgpuSplatCoverage {
     releaseResources() {
         for (const resource of this.owned) this.device.deferDestroy(resource);
         this.owned.length = 0;
+        this.device._vram.sb -= this.storageBytes;
+        this.device._vram.ub -= this.uniformBytes;
+        this.device._vram.tex -= this.textureBytes;
+        this.storageBytes = 0;
+        this.uniformBytes = 0;
+        this.textureBytes = 0;
         this.resources = null;
     }
 
@@ -89,6 +110,13 @@ class WebgpuSplatCoverage {
         const makeBuffer = (size, usage) => {
             const buffer = gpu.createBuffer({ size, usage });
             this.owned.push(buffer);
+            if (usage & GPUBufferUsage.UNIFORM) {
+                this.uniformBytes += size;
+                this.device._vram.ub += size;
+            } else {
+                this.storageBytes += size;
+                this.device._vram.sb += size;
+            }
             return buffer;
         };
         const makeTarget = () => {
@@ -98,6 +126,8 @@ class WebgpuSplatCoverage {
                 usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
             });
             this.owned.push(texture);
+            this.textureBytes += width * height * 4;
+            this.device._vram.tex += width * height * 4;
             return texture.createView();
         };
         // The indirect 2D grid has at most one partial row of 1024 workgroups.
@@ -128,6 +158,7 @@ class WebgpuSplatCoverage {
         return this.resources;
     }
 
+    /** @private */
     getPipelines(original, desc) {
         let pair = this.renderPipelines.get(original);
         if (!pair) {

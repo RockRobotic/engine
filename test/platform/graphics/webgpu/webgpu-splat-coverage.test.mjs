@@ -27,16 +27,20 @@ describe('WebGPU splat coverage', function () {
     });
 
     it('releases all owned resources without releasing world, projector or sorter inputs', function () {
-        const device = { deferDestroy: sinon.spy() };
+        const device = { deferDestroy: sinon.spy(), _vram: { sb: 32, ub: 16, tex: 256 } };
         const coverage = new WebgpuSplatCoverage(device);
         const inputs = Array.from({ length: 4 }, () => ({}));
         coverage.setInputs(...inputs, 128);
         const owned = [{}, {}, {}];
         coverage.owned.push(...owned);
         coverage.resources = { capacity: 4 };
+        coverage.storageBytes = 32;
+        coverage.uniformBytes = 16;
+        coverage.textureBytes = 256;
         coverage.destroy();
         coverage.destroy();
         expect(device.deferDestroy.getCalls().map(call => call.args[0])).to.deep.equal(owned);
         expect(coverage.resources).to.equal(null);
+        expect(device._vram).to.deep.equal({ sb: 0, ub: 0, tex: 0 });
     });
 });
