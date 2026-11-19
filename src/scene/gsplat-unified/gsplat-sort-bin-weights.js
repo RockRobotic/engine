@@ -18,6 +18,11 @@ class GSplatSortBinWeights {
         return 32;
     }
 
+    static bucketCount(count) {
+        const compareBits = Math.max(10, Math.min(20, Math.round(Math.log2(count / 4))));
+        return 2 ** compareBits + 1;
+    }
+
     /**
      * Weight tiers for camera-relative precision (distance from camera bin -> weight multiplier).
      * Closer bins get more precision for better visual quality near the camera.

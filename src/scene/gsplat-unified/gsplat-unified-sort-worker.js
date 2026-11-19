@@ -271,10 +271,8 @@ function UnifiedSortWorker() {
 
         const numVertices = centersData.totalActiveSplats;
 
-        // calculate number of bits needed to store sorting result
-        const compareBits = Math.max(10, Math.min(20, Math.round(Math.log2(numVertices / 4))));
-
-        const bucketCount = 2 ** compareBits + 1;
+        // eslint-disable-next-line no-undef
+        const bucketCount = GSplatSortBinWeights.bucketCount(numVertices);
 
         // create distance buffer
         if (distances?.length !== numVertices) {

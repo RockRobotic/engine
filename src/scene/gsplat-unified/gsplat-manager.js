@@ -1,6 +1,7 @@
 import { Mat4 } from '../../core/math/mat4.js';
 import { Vec3 } from '../../core/math/vec3.js';
 import { GraphNode } from '../graph-node.js';
+import { GSplatNearOrder } from './gsplat-near-order.js';
 import { GSplatUnifiedSorter } from './gsplat-unified-sorter.js';
 import { GSplatWorld } from './gsplat-world.js';
 import { WebglSplatCoverage } from '../../platform/graphics/webgl/webgl-splat-coverage.js';
@@ -185,6 +186,9 @@ class GSplatManager {
      */
     _boundRadialPosition = null;
 
+    /** @type {GSplatNearOrder|null} */
+    _nearOrder = null;
+
     // A fresh renderer or work buffer has no complete CPU order to keep on screen.
     _hasCpuOrder = false;
 
@@ -294,6 +298,7 @@ class GSplatManager {
      * @private
      */
     _onDeviceRestored() {
+        this._nearOrder = null;
         // rows already written to the spare order texture were lost with the context
         this._cancelStagedSort();
         this._hasCpuOrder = false;
@@ -312,6 +317,8 @@ class GSplatManager {
      * @private
      */
     destroyCpuSorting() {
+        if (!this.device.contextLost) this._nearOrder?.restore(this.world.workBuffer);
+        this._nearOrder = null;
         this._cancelStagedSort();
         this._hasCpuOrder = false;
         this.cpuSorter?.destroy();
@@ -627,6 +634,16 @@ class GSplatManager {
         }
         this._hasCpuOrder = count > 0;
         this._boundRadialPosition = radialPosition;
+        const data = orderData ?? this._stagedSort?.orderData;
+        if (this.device.isWebGL2 && (this.renderMode & GSPLAT_FORWARD) && radialPosition && count && data &&
+            this.renderer.material?.getDefine('GSPLAT_GL_COVERAGE')) {
+            this._nearOrder ??= new GSplatNearOrder();
+            if (!this._nearOrder.bind(this.world.getState(version), this.world.workBuffer.orderTexture, data)) {
+                this._nearOrder = null;
+            }
+        } else {
+            this._nearOrder = null;
+        }
     }
 
     /** @private */
@@ -742,6 +759,7 @@ class GSplatManager {
         // which reads the work buffer.
         this.world.syncFormat(this._formatResult);
         if (this._formatResult.bufferRecreated) {
+            this._nearOrder = null;
             this._cancelStagedSort();
             this._hasCpuOrder = false;
             this.renderer.setDataSource(this.world.workBuffer);
@@ -891,6 +909,14 @@ class GSplatManager {
 
         // return the number of active splats for stats
         const sortedState = this.world.getState(this.world.currentVersion);
+        if (this._nearOrder) {
+            const eligible = (this.renderMode & GSPLAT_FORWARD) && this.gsplat.radialSorting && this._nearOrder.state === sortedState &&
+                this.world.currentVersion === this.world.lastWorldStateVersion && !!this.renderer.material?.getDefine('GSPLAT_GL_COVERAGE');
+            if (!this._nearOrder.update(this.world.workBuffer, this.cameraNode.getPosition(), this._boundRadialPosition,
+                this.cameraNode.camera?.nearClip, eligible)) {
+                this._nearOrder = null;
+            }
+        }
         return sortedState ? sortedState.totalActiveSplats : 0;
     }
 
