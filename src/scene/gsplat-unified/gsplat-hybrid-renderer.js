@@ -413,14 +413,14 @@ class GSplatHybridRenderer extends GSplatRenderer {
             /** @type {StorageBuffer} */ (this.projector.projCache),
             /** @type {StorageBuffer} */ (this.intervalCompaction.numSplatsBuffer)
         );
-        // The coverage certificate uses the unmodified hybrid quad footprint, a single camera
-        // and the full-density forward pass. Other views keep their existing indirect draw.
-        const fullDensity = params.minContribution === 0 && params.foveationStrength === 0;
+        // Contribution filtering happens before projection results are compacted. Coverage
+        // reads the surviving count, order and cached quads from this same frame.
+        const uniformContribution = params.minContribution >= 0 && params.foveationStrength === 0;
         const chunks = params.material.shaderChunks.wgsl;
         // The world-space modifier runs in the projector, before the exact cached axes and
         // colors are written. A custom raster shader can change the footprint or blending.
         const defaultRaster = chunks.size === 0 || (chunks.size === 1 && chunks.has('gsplatModifyVS'));
-        const useCoverage = fullDensity && worldState.totalActiveSplats >= 4000000 &&
+        const useCoverage = uniformContribution && worldState.totalActiveSplats >= 4000000 &&
             !sceneCam.xrActive && !this.stochastic && !this.fisheyeProj.enabled &&
             !params.varyings.words && defaultRaster &&
             !this._material.getDefine('GSPLAT_OVERDRAW');

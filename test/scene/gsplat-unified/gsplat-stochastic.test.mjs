@@ -179,6 +179,46 @@ describe('GSplat stochastic rendering', function () {
         renderer._material.destroy();
     });
 
+    it('applies coverage to the current projected survivors when contribution filtering changes', function () {
+        const renderer = pipeline();
+        renderer.projector.projCache = {};
+        const setSplatCoverage = sinon.spy();
+        const drawCommands = new Map([[null, { impl: { setSplatCoverage } }]]);
+        Object.assign(renderer, {
+            stochastic: false,
+            meshInstance: { drawCommands },
+            setStereo() {},
+            setHybridSortedRendering() {},
+            _material: new ShaderMaterial()
+        });
+        const cameraNode = { camera: { camera: { xrActive: false }, rect: { z: 1, w: 1 } } };
+        const params = {
+            cameraNode,
+            material: renderer.material,
+            varyings: { words: 0 },
+            foveationStrength: 0,
+            minContribution: 0
+        };
+        const view = () => {
+            renderer.prepareRenderView(
+                { hasBounds: false, workBuffer: { frustumCuller: {}, format: { getStream: () => null } } },
+                { totalActiveSplats: 4000000, totalIntervals: 1 }, params
+            );
+            return setSplatCoverage.lastCall.args;
+        };
+        expect(view()[0]).to.equal(true);
+        params.minContribution = 3;
+        const [enabled, order, cache, count] = view();
+        expect(enabled).to.equal(true);
+        expect(order).to.equal(renderer.gpuSorter.sortIndirect.lastCall.returnValue);
+        expect(cache).to.equal(renderer.projector.projCache);
+        expect(count).to.equal(renderer.intervalCompaction.numSplatsBuffer);
+        expect(renderer.projector.dispatch.lastCall.args[0].minContribution).to.equal(3);
+        params.foveationStrength = 1;
+        expect(view()[0]).to.equal(false);
+        renderer.material.destroy();
+    });
+
     it('follows a mid-session dither mode change', function () {
         const renderer = Object.create(GSplatHybridRenderer.prototype);
         Object.assign(renderer, {
