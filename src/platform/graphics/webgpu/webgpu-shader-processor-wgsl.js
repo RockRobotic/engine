@@ -1318,23 +1318,13 @@ class WebgpuShaderProcessorWGSL {
      * @returns {string} - The modified source string.
      */
     static copyInputs(src, shader) {
-        const match = src.match(ENTRY_FUNCTION);
-
-        // check if match exists AND the parameter name (Group 2) was captured
-        if (!match || !match[2]) {
-            Debug.warn('No entry function found or input parameter name not captured.', { shader, src });
-            return src;
-        }
-
-        const inputName = match[2];
-        const braceIndex = match.index + match[0].length - 1; // Calculate the index of the '{'
-
-        // inject the line right after the opening brace
-        const beginning = src.slice(0, braceIndex + 1);
-        const end = src.slice(braceIndex + 1);
-
-        const lineToInject = `\n    _pcCopyInputs(${inputName});`;
-        return beginning + lineToInject + end;
+        let matched = false;
+        const result = src.replace(new RegExp(ENTRY_FUNCTION, 'g'), (entry, stage, inputName) => {
+            matched = true;
+            return `${entry}\n    _pcCopyInputs(${inputName});`;
+        });
+        if (!matched) Debug.warn('No shader entry function with an input parameter.', { shader, src });
+        return result;
     }
 
     static cutOut(src, start, end, replacement) {

@@ -58,8 +58,7 @@ varying @interpolate(flat, either) gaussianColor: half4;
 #endif
 #include "gsplatModifyPS"
 
-@fragment
-fn fragmentMain(input: FragmentInput) -> FragmentOutput {
+fn evaluateSplatFragment() -> FragmentOutput {
     var output: FragmentOutput;
 
     let A: half = dot(gaussianUV, gaussianUV);
@@ -154,4 +153,23 @@ fn fragmentMain(input: FragmentInput) -> FragmentOutput {
     #endif
 
     return output;
-}`;
+}
+
+@fragment
+fn fragmentMain(input: FragmentInput) -> FragmentOutput {
+    return evaluateSplatFragment();
+}
+
+#if defined(GSPLAT_COVERAGE_PASS) && defined(DITHER_NONE) && !defined(GSPLAT_STOCHASTIC) && !defined(PICK_PASS) && !defined(SHADOW_PASS) && !defined(PREPASS_PASS) && !defined(SCENE_TEXTURE_DEPTH)
+    struct SplatCoverageOutput {
+        @location(0) lower: vec4f,
+        @location(1) upper: vec4f,
+    }
+
+    @fragment
+    fn splatCoverageMain(input: FragmentInput) -> SplatCoverageOutput {
+        let color = evaluateSplatFragment().color;
+        return SplatCoverageOutput(color, color);
+    }
+#endif
+`;

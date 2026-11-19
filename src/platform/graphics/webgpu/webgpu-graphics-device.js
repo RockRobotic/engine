@@ -75,6 +75,16 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
      */
     _deferredDestroys = [];
 
+    splatCoverageVersion = -1;
+
+    splatCoveragePass = false;
+
+    _coverageBindings = [];
+
+    // #if _DEBUG
+    _activePassMarkers = [];
+    // #endif
+
     /**
      * @type {GPUAdapter|null}
      * @private
@@ -477,6 +487,10 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
     /** @private */
     destroyDeviceResources() {
 
+        for (const commands of this._drawCommands) {
+            if (commands.splatCoverage) commands.releaseSplatCoverage();
+        }
+        this._coverageBindings.length = 0;
         this.clearRenderer?.destroy();
         this.clearRenderer = null;
 
@@ -561,6 +575,7 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
         this.supportsGpuParticles = true;
         this.supportsCompute = true;
         this.supportsIndirectDraw = true;
+        this.supportsSplatCoverage = this.wgpu.features.has('indirect-first-instance');
 
         // the vertex shaders read the per mesh instance data from a storage buffer
         this.supportsMeshInstanceStorage = (limits.maxStorageBuffersInVertexStage ?? limits.maxStorageBuffersPerShaderStage) > 0;
@@ -1243,6 +1258,13 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
             // large part of the cost of a bind. A bind group without dynamic offsets passes none.
             const dynamicOffsets = offsets ?? bindGroup.uniformBufferOffsets;
             const count = dynamicOffsets.length;
+            if (this.splatCoveragePass) {
+                const entry = this._coverageBindings[index] ??= { group: null, owner: null, offsets: new Uint32Array(count) };
+                entry.group = bindGroup.impl.bindGroup;
+                entry.owner = bindGroup;
+                if (entry.offsets.length !== count) entry.offsets = new Uint32Array(count);
+                entry.offsets.set(dynamicOffsets);
+            }
             if (count === 0) {
                 this.passEncoder.setBindGroup(index, bindGroup.impl.bindGroup);
             } else {
@@ -1418,6 +1440,14 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
                 const storage = drawCommands.impl?.storage ?? this.indirectDrawBuffer;
                 const indirectBuffer = storage.impl.buffer;
                 const drawsCount = drawCommands.count;
+
+                const coverage = drawCommands.impl?.splatCoverage;
+                if (coverage?.enabled && indexBuffer && drawsCount === 1 && first && last &&
+                    coverage.draw(pipeline, primitive.count)) {
+                    this._drawCallsPerFrame++;
+                    WebgpuDebug.end(this, 'Drawing splats with coverage certificate');
+                    return;
+                }
 
                 // TODO: when multiDrawIndirect is supported, we can use it here instead of a loop
                 for (let d = 0; d < drawsCount; d++) {
@@ -1639,7 +1669,22 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
 
         // start the pass
         const commandEncoder = this.getCommandEncoder();
-        this.passEncoder = commandEncoder.beginRenderPass(renderPassDesc);
+        const attachments = wrt.colorAttachments;
+        this.splatCoveragePass = this.splatCoverageVersion === this.drawCommandsVersion &&
+            rt === this.backBuffer && !rt.flipY && !this.xrColorTexture && !this.externalBackbuffer &&
+            rt.samples === 1 && !wrt.depthAttachment?.transient && attachments.length === 1 &&
+            ['rgba8unorm', 'bgra8unorm'].includes(attachments[0].format) &&
+            !renderPassDesc.occlusionQuerySet;
+        let firstPass = renderPassDesc;
+        if (this.splatCoveragePass && firstPass.depthStencilAttachment) {
+            // Keep preceding opaque depth when the splat draw splits this pass. The resumed
+            // pass uses the original store operations, including a final discard where requested.
+            const depth = { ...firstPass.depthStencilAttachment };
+            if (depth.depthStoreOp) depth.depthStoreOp = 'store';
+            if (depth.stencilStoreOp) depth.stencilStoreOp = 'store';
+            firstPass = { ...firstPass, depthStencilAttachment: depth };
+        }
+        this.passEncoder = commandEncoder.beginRenderPass(firstPass);
         this.passEncoder.label = `${renderPass.name}-PassEncoder RT:${rt.name}`;
 
         // push marker to the passEncoder
@@ -1672,6 +1717,8 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
         // end the render pass
         this.passEncoder.end();
         this.passEncoder = null;
+        this.splatCoveragePass = false;
+        this._coverageBindings.length = 0;
         this.insideRenderPass = false;
 
         // each render pass can use different number of bind groups
@@ -2202,11 +2249,17 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
 
     // #if _DEBUG
     pushMarker(name) {
-        this.passEncoder?.pushDebugGroup(name);
+        if (this.passEncoder) {
+            this._activePassMarkers.push(name);
+            this.passEncoder.pushDebugGroup(name);
+        }
     }
 
     popMarker() {
-        this.passEncoder?.popDebugGroup();
+        if (this.passEncoder) {
+            this._activePassMarkers.pop();
+            this.passEncoder.popDebugGroup();
+        }
     }
     // #endif
 }

@@ -246,6 +246,15 @@ class GraphicsDevice extends EventHandler {
     supportsIndirectDraw = false;
 
     /**
+     * True if dense, full-detail hybrid Gaussian draws can skip occluded work using the
+     * current frame's foreground. Individual render passes also check their attachments.
+     *
+     * @type {boolean}
+     * @readonly
+     */
+    supportsSplatCoverage = false;
+
+    /**
      * True if the vertex shaders can read the model and normal matrices of a mesh instance from
      * a storage buffer the device holds, see {@link GraphicsDevice#meshInstanceStorage} (WebGPU
      * only).

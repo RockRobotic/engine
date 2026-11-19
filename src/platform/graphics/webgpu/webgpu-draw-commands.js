@@ -1,4 +1,5 @@
 import { BUFFERUSAGE_COPY_DST, BUFFERUSAGE_INDIRECT } from '../constants.js';
+import { WebgpuSplatCoverage } from './webgpu-splat-coverage.js';
 import { StorageBuffer } from '../storage-buffer.js';
 import { DebugHelper } from '../../../core/debug.js';
 import { getPrimitiveCount } from '../primitive-utils.js';
@@ -30,6 +31,24 @@ class WebgpuDrawCommands {
 
     /** @type {number} */
     count = 0;
+
+    /** @type {WebgpuSplatCoverage|null} */
+    splatCoverage = null;
+
+    setSplatCoverage(enabled, sorted, cache, count, scratch, instanceSize) {
+        if (enabled && this.device.supportsSplatCoverage) {
+            this.splatCoverage ??= new WebgpuSplatCoverage(this.device);
+            this.splatCoverage.setInputs(sorted, cache, count, scratch, instanceSize);
+            this.device.splatCoverageVersion = this.device.drawCommandsVersion;
+        } else if (this.splatCoverage) {
+            this.splatCoverage.enabled = false;
+        }
+    }
+
+    releaseSplatCoverage() {
+        this.splatCoverage?.destroy();
+        this.splatCoverage = null;
+    }
 
     /**
      * @param {WebgpuGraphicsDevice} device - Graphics device.
@@ -116,6 +135,7 @@ class WebgpuDrawCommands {
     }
 
     destroy() {
+        this.releaseSplatCoverage();
         this.device._drawCommands.delete(this);
         this.storage?.destroy();
         this.storage = null;
