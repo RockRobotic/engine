@@ -1437,25 +1437,21 @@ class WebgpuGraphicsDevice extends GraphicsDevice {
             // draw
             if (drawCommands) { // indirect draw path
 
-                const storage = drawCommands.impl?.storage ?? this.indirectDrawBuffer;
-                const indirectBuffer = storage.impl.buffer;
                 const drawsCount = drawCommands.count;
-
                 const coverage = drawCommands.impl?.splatCoverage;
-                if (coverage?.enabled && indexBuffer && drawsCount === 1 && first && last &&
-                    coverage.draw(pipeline, primitive.count)) {
-                    this._drawCallsPerFrame++;
-                    WebgpuDebug.end(this, 'Drawing splats with coverage certificate');
-                    return;
-                }
-
-                // TODO: when multiDrawIndirect is supported, we can use it here instead of a loop
-                for (let d = 0; d < drawsCount; d++) {
-                    const indirectOffset = (drawCommands.slotIndex + d) * _indirectEntryByteSize;
-                    if (indexBuffer) {
-                        passEncoder.drawIndexedIndirect(indirectBuffer, indirectOffset);
-                    } else {
-                        passEncoder.drawIndirect(indirectBuffer, indirectOffset);
+                const covered = coverage?.enabled && indexBuffer && drawsCount === 1 && first && last &&
+                    coverage.draw(pipeline, primitive.count);
+                if (!covered) {
+                    const storage = drawCommands.impl?.storage ?? this.indirectDrawBuffer;
+                    const indirectBuffer = storage.impl.buffer;
+                    // TODO: when multiDrawIndirect is supported, we can use it here instead of a loop
+                    for (let d = 0; d < drawsCount; d++) {
+                        const indirectOffset = (drawCommands.slotIndex + d) * _indirectEntryByteSize;
+                        if (indexBuffer) {
+                            passEncoder.drawIndexedIndirect(indirectBuffer, indirectOffset);
+                        } else {
+                            passEncoder.drawIndirect(indirectBuffer, indirectOffset);
+                        }
                     }
                 }
             } else { // single draw path

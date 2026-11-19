@@ -107,6 +107,28 @@ describe('WebGPU vertex and index buffer binding', function () {
         expect(encoder.setIndexBuffer.args.map(args => args[0])).to.deep.equal([ibA.impl.buffer, ibB.impl.buffer, ibA.impl.buffer]);
     });
 
+    it('binds only the overlay vertex format after a covered splat draw', function () {
+        const splat = interleaved(1);
+        const overlay = interleaved(2);
+        const ib = indexBuffer();
+        const coverage = { enabled: true, draw: sinon.stub().returns(true) };
+        const commands = {
+            impl: { storage: { impl: { buffer: {} } }, splatCoverage: coverage },
+            count: 1,
+            getPrimitiveCount: () => 12
+        };
+
+        device.setVertexBuffer(splat);
+        device.draw(primitive, ib, 1, commands);
+        drawMesh(overlay, ib);
+
+        expect(coverage.draw.calledOnce).to.be.true;
+        expect(device.renderPipeline.get.lastCall.args.slice(1, 3)).to.deep.equal([overlay.format, undefined]);
+        expect(encoder.setVertexBuffer.lastCall.args).to.deep.equal([0, overlay.impl.buffer, 0]);
+        expect(encoder.drawIndexed.calledOnce).to.be.true;
+        expect(device._drawCallsPerFrame).to.equal(2);
+    });
+
     it('rebinds only the streams whose buffer or offset changed', function () {
         const buffer = {};
         drawMesh(separate([0, 100, 200], buffer));
