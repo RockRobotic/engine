@@ -71,8 +71,8 @@ describe('GSplatManager CPU order uploads', function () {
         return state;
     };
 
-    const sort = (state) => {
-        sorter.bufferLength = state.textureSize ** 2;
+    const sort = (state, rows = state.textureSize) => {
+        sorter.bufferLength = state.textureSize * rows;
         const order = new Uint32Array(sorter.bufferLength);
         sorter.jobsInFlight++;
         sorter.onSorted({ count: state.totalActiveSplats, version: state.version, order: order.buffer });
@@ -367,13 +367,51 @@ describe('GSplatManager CPU order uploads', function () {
         expect(drawnCount()).to.equal(100);
     });
 
-    it('applies a resized order and a small order directly', function () {
+    it('keeps the old atlas visible until all rows of a resized streamed order are uploaded', function () {
+        sort(newState(100));
+        frame();
+        const work = world.workBuffer;
+        const upload = sinon.spy(work.uploadStream, 'upload');
+        for (const width of [1600, 1500]) {
+            const oldState = world.currentState;
+            const oldOrder = boundOrder();
+            const count = 1440 * width - 5;
+            const next = newState(count, { size: width });
+            const order = sort(next, 1440);
+            order[count - 1] = 783;
+            frame();
+            frame();
+            expect(world.currentState).to.equal(oldState);
+            expect(work.textureSize).to.equal(oldState.textureSize);
+            expect(drawnCount()).to.equal(oldState.totalActiveSplats);
+            expect(boundOrder()).to.equal(oldOrder);
+            const [firstSlice, spare, start] = upload.lastCall.args;
+            expect(spare).not.to.equal(oldOrder);
+            expect(start).to.equal(0);
+            expect(firstSlice.length).to.equal(width * (width / 2));
+
+            frame();
+            expect(world.currentState).to.equal(next);
+            expect(work.textureSize).to.equal(width);
+            expect(drawnCount()).to.equal(count);
+            const [tail, texture, offset] = upload.lastCall.args;
+            expect(texture).to.equal(spare);
+            expect(boundOrder()).to.equal(texture);
+            expect(texture.width).to.equal(width);
+            expect(texture.height).to.equal(1440);
+            expect(offset).to.equal(firstSlice.length);
+            expect(offset + tail.length).to.equal(order.length);
+            expect(tail[count - 1 - offset]).to.equal(783);
+        }
+    });
+
+    it('applies small orders directly even when the atlas resizes', function () {
         const first = newState(100);
         sort(first);
         frame();
         for (const size of [1600, 4, 4]) {
             const next = newState(10, { size });
-            sort(next);
+            sort(next, Math.ceil(10 / size));
             frame();
             expect(world.currentState).to.equal(next);
             expect(manager.hasPendingSort).to.equal(false);

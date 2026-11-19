@@ -447,11 +447,12 @@ class GSplatWorkBuffer {
      * world state and binds the completed order in the same frame.
      *
      * @param {Uint32Array} data - The order data. Kept until the upload completes or is cancelled.
+     * @param {number} [size] - Row width of the incoming order. A streamed LOD can use a different
+     * width from the atlas currently being drawn.
      * @returns {boolean} False when the upload should be done with {@link setOrderData} instead:
      * on WebGPU, or when the texture is small enough to upload in one go.
      */
-    beginOrderUpload(data) {
-        const size = this.textureSize;
+    beginOrderUpload(data, size = this.textureSize) {
         if (this.device.isWebGPU || data.length > size * size || data.length % size !== 0 || data.byteLength <= ORDER_DIRECT_MAX_BYTES) {
             return false;
         }
@@ -487,7 +488,7 @@ class GSplatWorkBuffer {
         const spare = this._orderTextureSpare;
         if (!upload || !spare) return null;
 
-        const size = this.textureSize;
+        const size = spare.width;
         const rows = Math.min(this._orderUploadPacer.rows(size, 4), spare.height - upload.row);
         const start = upload.row * size;
 

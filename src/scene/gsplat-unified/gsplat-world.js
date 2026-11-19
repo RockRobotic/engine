@@ -779,7 +779,6 @@ class GSplatWorld {
         const state = this.getState(version);
         return !!state && !!this.currentState?.sortedBefore && !this._workBufferRebuildRequired &&
             this._currentVersion >= this._lastStructuralVersion &&
-            state.textureSize === this._workBuffer.textureSize &&
             (version === this._currentVersion || (this.hasOctreeInstances && state.totalActiveSplats > 0));
     }
 

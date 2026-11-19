@@ -602,10 +602,11 @@ class GSplatManager {
      * @param {Vec3|null} [radialPosition] - Camera position used by a radial sort.
      */
     onSorted(count, version, orderData, radialPosition = null) {
-        if (version < this._minSortVersion || !this.world.getState(version)) return;
+        const state = this.world.getState(version);
+        if (version < this._minSortVersion || !state) return;
 
         if (this._hasCpuOrder && this.world.canStageOrder(version) && !this._prioritizeCameraOrder(version, orderData, radialPosition) &&
-            this.world.workBuffer.beginOrderUpload(orderData)) {
+            this.world.workBuffer.beginOrderUpload(orderData, state.textureSize)) {
             this._stagedSort = { count, version, orderData, radialPosition };
             this.cpuSorter?.retainOrderData();
         } else {
@@ -658,7 +659,7 @@ class GSplatManager {
     /**
      * Finishes one order while the sorter coalesces newer results. Restarting the upload for
      * every LOD version would starve the display when streaming is faster than the upload.
-     * A placement change or resize takes priority once its order is available.
+     * A structural placement change takes priority once its order is available.
      *
      * @private
      */
