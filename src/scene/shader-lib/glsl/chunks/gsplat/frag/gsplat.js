@@ -107,6 +107,10 @@ void main(void) {
 
         gl_FragColor = vec4(fragColor.xyz * fragColor.a, fragColor.a);
 
+        #if defined(GSPLAT_GL_COVERAGE) && defined(FORWARD_PASS) && defined(DITHER_NONE) && !defined(PICK_PASS) && !defined(SHADOW_PASS) && !defined(PREPASS_PASS) && !defined(SCENE_TEXTURE_DEPTH)
+            pcFragColor1 = gl_FragColor;
+        #endif
+
         // The same premultiplied blending which composites the color accumulates the scene depth, so
         // the splats gain a depth without being rendered a second time. Dithered splats render as
         // opaque, and the fragments which survive the dither have full coverage.

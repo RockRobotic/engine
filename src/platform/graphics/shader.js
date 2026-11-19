@@ -231,11 +231,22 @@ class Shader {
 
             const wgsl = definition.shaderLanguage === SHADERLANGUAGE_WGSL;
 
+            const vertexSource = definition.vshader;
+
             // pre-process vertex shader source
             definition.vshader = Preprocessor.run(definition.vshader, definition.vincludes, {
                 sourceName: `vertex shader for ${this.label}`,
                 stripDefines: wgsl
             });
+
+            // The WebGL coverage classifier shares the material's exact camera, format and
+            // modifier chunks while running once per source texel in a fragment stage.
+            if (graphicsDevice.isWebGL2 && definition.vshader?.includes('uniform uint splatCoverageStart;')) {
+                const classifier = vertexSource.replace('#version 300 es', '#version 300 es\n#define GSPLAT_COVERAGE_CLASSIFY');
+                this.splatClassifierSource = Preprocessor.run(classifier, definition.vincludes, {
+                    sourceName: `coverage classifier for ${this.label}`
+                });
+            }
 
             // if no attributes are specified, try to extract the default names after the shader has been pre-processed
             if (definition.shaderLanguage === SHADERLANGUAGE_GLSL) {

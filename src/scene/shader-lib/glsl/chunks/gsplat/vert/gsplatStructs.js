@@ -33,6 +33,9 @@ struct SplatCorner {
         float aaFactor; // for scenes generated with antialiasing
     #endif
 
+    #ifdef GSPLAT_COVERAGE_CLASSIFY
+        vec2 coverageExtent;
+    #endif
     vec2 v;
     float dlen;
 };

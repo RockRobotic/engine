@@ -8,6 +8,7 @@ import gsplatModifyPS from '../chunks/gsplat/frag/gsplatModify.js';
 import gsplatWorkBufferGeometryPS from '../chunks/gsplat/frag/gsplatWorkBufferGeometry.js';
 import gsplatQuatToMat3VS from '../chunks/gsplat/vert/gsplatQuatToMat3.js';
 import gsplatStructsVS from '../chunks/gsplat/vert/gsplatStructs.js';
+import gsplatCoverageClassifyPS from '../chunks/gsplat/frag/gsplatCoverageClassify.js';
 import gsplatCornerVS from '../chunks/gsplat/vert/gsplatCorner.js';
 import gsplatOutputVS from '../chunks/gsplat/vert/gsplatOutput.js';
 import gsplatPS from '../chunks/gsplat/frag/gsplat.js';
@@ -30,6 +31,7 @@ import gsplatContainerFloatReadVS from '../chunks/gsplat/vert/formats/containerF
 export const gsplatChunksGLSL = {
     gsplatCenterVS,
     gsplatCornerVS,
+    gsplatCoverageClassifyPS,
     gsplatCommonVS,
     gsplatSplatVS,
     gsplatEvalSHVS,

@@ -4,6 +4,10 @@ export default /* glsl */`
 #endif
 #include "gsplatCommonVS"
 
+#ifdef GSPLAT_COVERAGE_CLASSIFY
+    #include "gsplatCoverageClassifyPS"
+#else
+
 varying mediump vec2 gaussianUV;
 flat varying mediump vec4 gaussianColor;
 
@@ -130,4 +134,5 @@ void main(void) {
         vPickId = loadPcId().r;
     #endif
 }
+#endif
 `;

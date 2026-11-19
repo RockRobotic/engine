@@ -114,6 +114,9 @@ bool initCornerCov(SplatSource source, SplatCenter center, out SplatCorner corne
 
     corner.offset = vec3((source.cornerUV.x * v1 + source.cornerUV.y * v2) * c, 0.0);
     corner.uv = source.cornerUV;
+    #ifdef GSPLAT_COVERAGE_CLASSIFY
+        corner.coverageExtent = 0.5 * (abs(v1) + abs(v2));
+    #endif
 
     return true;
 }

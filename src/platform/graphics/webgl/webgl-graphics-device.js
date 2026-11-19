@@ -35,6 +35,7 @@ import { DebugGraphics } from '../debug-graphics.js';
 import { WebglVertexBuffer } from './webgl-vertex-buffer.js';
 import { WebglIndexBuffer } from './webgl-index-buffer.js';
 import { WebglShader } from './webgl-shader.js';
+import { WebglSplatCoverage } from './webgl-splat-coverage.js';
 import { WebglUniformBuffer } from './webgl-uniform-buffer.js';
 import { WebglBindGroup } from './webgl-bind-group.js';
 import { WebglBindGroupFormat } from './webgl-bind-group-format.js';
@@ -703,6 +704,8 @@ class WebglGraphicsDevice extends GraphicsDevice {
      * Destroy the graphics device.
      */
     destroy() {
+        this.splatCoverage?.destroy();
+        this.splatCoverage = null;
         super.destroy();
 
         // rendering stops here, so a copy still waiting for the start of a frame would never run,
@@ -1023,6 +1026,8 @@ class WebglGraphicsDevice extends GraphicsDevice {
         this.vertexUniformsCount = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
         this.fragmentUniformsCount = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
         this.maxColorAttachments = gl.getParameter(gl.MAX_COLOR_ATTACHMENTS);
+        this.supportsSplatCoverage = this.maxColorAttachments >= 2 && this.maxTextures >= 16 &&
+            gl.getParameter(gl.SUBPIXEL_BITS) >= 4;
         this.maxVolumeSize = gl.getParameter(gl.MAX_3D_TEXTURE_SIZE);
 
         ext = this.extDebugRendererInfo;
@@ -1196,7 +1201,8 @@ class WebglGraphicsDevice extends GraphicsDevice {
      * @ignore
      */
     loseContext() {
-
+        this.splatCoverage?.destroy();
+        this.splatCoverage = null;
         super.loseContext();
 
         // The pixel buffers these copies would read went with the context, and rendering stops
@@ -2302,7 +2308,12 @@ class WebglGraphicsDevice extends GraphicsDevice {
                         const offset = primitive.base * indexBuffer.bytesPerIndex;
 
                         if (numInstances > 0) {
-                            gl.drawElementsInstanced(mode, count, format, offset, numInstances);
+                            let covered = false;
+                            if (shader.splatClassifierSource && numInstances >= 32768) {
+                                this.splatCoverage ??= new WebglSplatCoverage(this);
+                                covered = this.splatCoverage.draw(shader, mode, count, format, offset, numInstances);
+                            }
+                            if (!covered) gl.drawElementsInstanced(mode, count, format, offset, numInstances);
                         } else {
                             gl.drawElements(mode, count, format, offset);
                         }

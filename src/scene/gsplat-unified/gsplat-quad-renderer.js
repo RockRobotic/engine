@@ -80,6 +80,7 @@ class GSplatQuadRenderer extends GSplatRenderer {
         this._internalDefines.add('GSPLAT_INDIRECT_DRAW');
         this._internalDefines.add('GSPLAT_SEPARATE_OPACITY');
         this._internalDefines.add('GSPLAT_FISHEYE');
+        this._internalDefines.add('GSPLAT_GL_COVERAGE');
         this._internalDefines.add('GSPLAT_NO_FOG');
         this._internalDefines.add('GSPLAT_NO_TONEMAP');
         this._internalDefines.add('GSPLAT_OVERDRAW');
@@ -173,6 +174,10 @@ class GSplatQuadRenderer extends GSplatRenderer {
         // set instance properties
         const dither = false;
         this._material.setParameter('numSplats', 0);
+        if (this.device.isWebGL2) {
+            this._material.setParameter('splatCoverageStart', 0);
+            this._material.setParameter('splatCompactCount', 0);
+        }
 
         this.setOrderData();
 
@@ -303,6 +308,18 @@ class GSplatQuadRenderer extends GSplatRenderer {
         this.fisheyeProj.update(this.resolveFisheye(params.fisheye), cam.fov, cam.projectionMatrix);
 
         const fisheyeEnabled = this.fisheyeProj.enabled;
+        if (this.device.isWebGL2) {
+            const chunks = params.material.shaderChunks.glsl;
+            const coverage = this.device.supportsSplatCoverage && !cam.xrActive && !fisheyeEnabled &&
+                !params.varyings.words && !params.colorRamp && !params.sceneDepthWrite &&
+                !params.material.getDefine('GSPLAT_2DGS') && !params.material.getDefine('GSPLAT_USER_VARYINGS') &&
+                !params.material.getDefine('GSPLAT_OVERDRAW') && !Number(params.material.defines.get('SH_BANDS')) &&
+                (chunks.size === 0 || (chunks.size === 1 && chunks.has('gsplatModifyVS')));
+            if (!!this._material.getDefine('GSPLAT_GL_COVERAGE') !== coverage) {
+                this._material.setDefine('GSPLAT_GL_COVERAGE', coverage);
+                this._material.update();
+            }
+        }
         if (fisheyeEnabled !== this._lastFisheyeEnabled) {
             this._lastFisheyeEnabled = fisheyeEnabled;
             this._material.setDefine('GSPLAT_FISHEYE', fisheyeEnabled);

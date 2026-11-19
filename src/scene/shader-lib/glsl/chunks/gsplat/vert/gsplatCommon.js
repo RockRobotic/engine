@@ -7,7 +7,9 @@ export default /* glsl */`
 #include "gsplatEvalSHVS"
 #include "gsplatQuatToMat3VS"
 #include "gsplatReadVS"
-#include "gsplatSourceVS"
+#ifndef GSPLAT_COVERAGE_CLASSIFY
+    #include "gsplatSourceVS"
+#endif
 #include "gsplatCenterVS"
 #include "gsplatCornerVS"
 #include "gsplatOutputVS"

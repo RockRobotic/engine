@@ -3,6 +3,7 @@ import { Vec3 } from '../../core/math/vec3.js';
 import { GraphNode } from '../graph-node.js';
 import { GSplatUnifiedSorter } from './gsplat-unified-sorter.js';
 import { GSplatWorld } from './gsplat-world.js';
+import { WebglSplatCoverage } from '../../platform/graphics/webgl/webgl-splat-coverage.js';
 import { GSplatQuadRenderer } from './gsplat-quad-renderer.js';
 import { GSplatHybridRenderer } from './gsplat-hybrid-renderer.js';
 import { GSplatHybridRendererScratch } from './gsplat-hybrid-renderer-scratch.js';
@@ -620,6 +621,10 @@ class GSplatManager {
         if (orderData) this.world.workBuffer.setOrderData(orderData);
         if (result.rebuilt) this.renderer.update(result.count, result.textureSize);
         this.renderer.setOrderData();
+        if (this.device.isWebGL2 && this.device.supportsSplatCoverage) {
+            const state = this.world.getState(version);
+            WebglSplatCoverage.bindRows(this.world.workBuffer.orderTexture, state.textureSize, state.coverageRows);
+        }
         this._hasCpuOrder = count > 0;
         this._boundRadialPosition = radialPosition;
     }
