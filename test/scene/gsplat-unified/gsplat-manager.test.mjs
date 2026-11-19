@@ -251,6 +251,34 @@ describe('GSplatManager CPU order uploads', function () {
         expect(manager.hasPendingSort).to.equal(false);
     });
 
+    it('sorts the latest camera after movement stops during a running job', function () {
+        sorter.worker.postMessage = sinon.spy();
+        const first = [{ offset: 1 }];
+        const last = [{ offset: 3 }];
+        sorter.setSortParams(first, true);
+        sorter.setSortParams([{ offset: 2 }], true);
+        sorter.setSortParams(last, true);
+        expect(sorter.worker.postMessage.callCount).to.equal(1);
+
+        sorter.onSorted({ count: 0, order: new ArrayBuffer(0), version: 0 });
+        expect(sorter.worker.postMessage.callCount).to.equal(2);
+        expect(sorter.worker.postMessage.lastCall.args[0].sortParams).to.equal(last);
+        sorter.onSorted({ count: 0, order: new ArrayBuffer(0), version: 0 });
+        expect(sorter.jobsInFlight).to.equal(0);
+        expect(sorter.worker.postMessage.callCount).to.equal(2);
+    });
+
+    it('does not sort a deferred old camera request against a replacement world layout', function () {
+        sorter.worker.postMessage = sinon.spy();
+        sorter.setSortParams([{ offset: 1 }], true);
+        sorter.setSortParams([{ offset: 2 }], true);
+        sorter.setSortParameters({ textureSize: 4 });
+        sorter.onSorted({ count: 0, order: new ArrayBuffer(0), version: 0 });
+        expect(sorter.worker.postMessage.callCount).to.equal(2);
+        sorter.setSortParams([{ offset: 3 }], true);
+        expect(sorter.worker.postMessage.lastCall.args[0].sortParams[0].offset).to.equal(3);
+    });
+
     it('applies a resized order and a small order directly', function () {
         const first = newState(100);
         sort(first);

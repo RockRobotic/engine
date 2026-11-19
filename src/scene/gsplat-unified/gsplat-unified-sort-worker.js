@@ -7,7 +7,6 @@ function UnifiedSortWorker() {
     let centersData;
     let distances;
     let countBuffer;
-    let indexMap;
 
     // Sorting mode: false = forward vector (directional), true = radial distance (for cubemaps)
     let _radialSort = false;
@@ -46,7 +45,6 @@ function UnifiedSortWorker() {
     };
 
     // Sort key evaluation iterates only active splats (padding is excluded).
-    // The indexMap (built on intervals) provides the work-buffer pixel mapping.
     const evaluateSortKeysCommon = (sortParams, minDist, range, distances, countBuffer, centersData, processSplatFn) => {
         const { ids, intervals } = centersData;
 
@@ -167,11 +165,21 @@ function UnifiedSortWorker() {
             console.warn(`[SortWorker] ${numVertices - validCount} splats lost due to sortKey overflow. Check resource AABB bounds contain all the splats.`);
         }
 
-        // build output array — map through indexMap to get work-buffer pixel indices
-        for (let i = 0; i < numVertices; i++) {
-            const distance = distances[i];
-            const destIndex = --countBuffer[distance];
-            order[destIndex] = indexMap[i];
+        // Every allocation is consecutive in the work buffer. Advance its pixel index in
+        // lockstep with the compact keys, preserving the original scatter order for tied keys.
+        const { ids, intervals, pixelOffsets } = centersData;
+        let compactIndex = 0;
+        for (let placement = 0; placement < ids.length; placement++) {
+            const ranges = intervals[placement].length ? intervals[placement] : [0, centersMap.get(ids[placement]).length / 3];
+            const offsets = pixelOffsets[placement];
+            for (let i = 0; i < ranges.length; i += 2) {
+                let pixel = offsets[i / 2];
+                const end = compactIndex + (ranges[i + 1] - ranges[i]);
+                while (compactIndex < end) {
+                    const distance = distances[compactIndex++];
+                    order[--countBuffer[distance]] = pixel++;
+                }
+            }
         }
     };
 
@@ -312,35 +320,6 @@ function UnifiedSortWorker() {
         myself.postMessage(response, transferList);
     };
 
-    /**
-     * Builds the indexMap that maps compact splat index to work-buffer pixel index.
-     * Called once when the intervals message arrives (world state change), not per-sort.
-     *
-     * @param {object} data - The intervals message data containing layout metadata.
-     */
-    const buildIndexMap = (data) => {
-        const { ids, pixelOffsets, intervals, totalActiveSplats } = data;
-
-        if (!indexMap || indexMap.length < totalActiveSplats) {
-            indexMap = new Uint32Array(totalActiveSplats);
-        }
-
-        let compactIdx = 0;
-        for (let paramIdx = 0; paramIdx < ids.length; paramIdx++) {
-            const centers = centersMap.get(ids[paramIdx]);
-            const offsets = pixelOffsets[paramIdx];
-            const intervalsArray = intervals[paramIdx].length > 0 ? intervals[paramIdx] : [0, centers.length / 3];
-
-            for (let i = 0; i < intervalsArray.length; i += 2) {
-                let workBufferIndex = offsets[i / 2];
-                const count = intervalsArray[i + 1] - intervalsArray[i];
-                for (let j = 0; j < count; j++) {
-                    indexMap[compactIdx++] = workBufferIndex++;
-                }
-            }
-        }
-    };
-
     myself.addEventListener('message', (message) => {
         const msgData = message.data ?? message;
 
@@ -369,7 +348,6 @@ function UnifiedSortWorker() {
             // intervals
             case 'intervals': {
                 centersData = msgData;
-                buildIndexMap(centersData);
                 break;
             }
         }

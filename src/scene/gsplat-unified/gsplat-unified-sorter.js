@@ -25,6 +25,14 @@ class GSplatUnifiedSorter extends EventHandler {
     hasNewVersion = false;
 
     /**
+     * Latest camera request for the current layout while a worker sort is running.
+     *
+     * @type {{ params: object[], radialSorting: boolean } | null}
+     * @private
+     */
+    _deferredCamera = null;
+
+    /**
      * Pending sorted result to be applied next frame. If multiple sorted results are received from
      * the worker, the latest result is stored here.
      *
@@ -99,6 +107,13 @@ class GSplatUnifiedSorter extends EventHandler {
             version: msgData.version,
             orderData: orderData
         };
+
+        // The camera may have come to rest while the worker was busy. Dispatch its latest
+        // exact pose here; render-on-demand might never report another camera movement.
+        if (this.jobsInFlight === 0 && this._deferredCamera) {
+            const { params, radialSorting } = this._deferredCamera;
+            this.setSortParams(params, radialSorting);
+        }
     }
 
     applyPendingSorted() {
@@ -132,6 +147,7 @@ class GSplatUnifiedSorter extends EventHandler {
 
     destroy() {
         this._destroyed = true;
+        this._deferredCamera = null;
         this.pendingSorted = null;
         this.worker.terminate();
         this.worker = null;
@@ -213,6 +229,7 @@ class GSplatUnifiedSorter extends EventHandler {
 
         // we have a new version to process
         this.hasNewVersion = true;
+        this._deferredCamera = null; // sortParams are ordered by the previous layout's placements
 
         // output size matches input size, clear available data when it changes
         const { textureSize } = payload;
@@ -228,13 +245,13 @@ class GSplatUnifiedSorter extends EventHandler {
     /**
      * Sends sorting parameters to the sorter. Called every frame sorting is needed.
      *
-     * @param {object} params - The sorting parameters - per-splat directions, offsets, scales, AABBs.
+     * @param {object[]} params - The sorting parameters - per-splat directions, offsets, scales, AABBs.
      * @param {boolean} radialSorting - Whether to use radial distance sorting.
      */
     setSortParams(params, radialSorting) {
 
-        // only process job requests if we have a new version or no jobs are in flight
         if (this.hasNewVersion || this.jobsInFlight === 0) {
+            this._deferredCamera = null;
 
             // reuse or allocate new order data
             let orderData = this.availableOrderData.pop();
@@ -255,6 +272,8 @@ class GSplatUnifiedSorter extends EventHandler {
             }, [
                 orderData.buffer
             ]);
+        } else {
+            this._deferredCamera = { params, radialSorting };
         }
     }
 }
