@@ -183,10 +183,20 @@ fn computeSplatCov(
     if (gsplatFootprintSmallerThan(aCull, b, cCull, minPixelSize)) {
         return result;
     }
+    #ifdef GSPLAT_CUSTOM_CULL_THRESHOLDS
+        // Optional gsplatModifyVS hook shared by the forward and pick projectors.
+        // The covariance uses the same screen-space low-pass as the standard culls.
+        if (shouldCullProjectedSplat(viewCenter, vec3f(aCull, b, cCull), opacity)) {
+            return result;
+        }
+    #endif
 
     // Screen-space filter: the classic dilation, or for compensated splats the filter they were
     // trained with (antiAliasFilterSize is in pixels squared, the covariance in half pixel units).
     var lowpass = GSPLAT_LOWPASS;
+    #ifdef GSPLAT_CUSTOM_LOWPASS
+        lowpass = 4.0 * getSplatLowpassVariance(viewCenter, GSPLAT_LOWPASS * 0.25);
+    #endif
     #if GSPLAT_AA
         var compensated = true;
         #ifdef GSPLAT_AA_MIXED

@@ -1057,8 +1057,18 @@ class GSplatParams {
     /**
      * A material template that can be customized by the user. Any defines, parameters, or shader
      * chunks set on this material will be automatically applied to all GSplat components. After
-     * making changes, call {@link Material#update} to for the changes to be applied on the next
-     * frame.
+     * making changes, call {@link Material#update} to apply them on the next frame.
+     *
+     * On WebGPU, enable the `GSPLAT_CUSTOM_CULL_THRESHOLDS` material define to apply an
+     * additional per-splat rejection test in the 3D Gaussian raster paths. Supply
+     * `fn shouldCullProjectedSplat(viewCenter: vec3f, covariance: vec3f, opacity: f32) -> bool`
+     * in the WGSL `gsplatModifyVS` chunk. The arguments are the view-space center, the
+     * three entries (xx, xy, yy) of the low-pass-filtered screen covariance, and peak opacity.
+     *
+     * To customize the draw footprint in those WebGPU paths, enable `GSPLAT_CUSTOM_LOWPASS`
+     * and supply `fn getSplatLowpassVariance(viewCenter: vec3f, defaultVariance: f32) -> f32`
+     * in the same chunk. Return a nonnegative variance in squared pixels. The engine uses the
+     * trained filter for AA-compensated splats and evaluates culling with its own footprint.
      *
      * @type {ShaderMaterial}
      * @example
