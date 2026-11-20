@@ -194,6 +194,9 @@ fn computeSplatCov(
     // Screen-space filter: the classic dilation, or for compensated splats the filter they were
     // trained with (antiAliasFilterSize is in pixels squared, the covariance in half pixel units).
     var lowpass = GSPLAT_LOWPASS;
+    #ifdef GSPLAT_CUSTOM_LOWPASS
+        lowpass = 4.0 * getSplatLowpassVariance(viewCenter, GSPLAT_LOWPASS * 0.25);
+    #endif
     #if GSPLAT_AA
         var compensated = true;
         #ifdef GSPLAT_AA_MIXED

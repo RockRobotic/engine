@@ -1065,6 +1065,11 @@ class GSplatParams {
      * in the WGSL `gsplatModifyVS` chunk. The arguments are the view-space center, the
      * three entries (xx, xy, yy) of the low-pass-filtered screen covariance, and peak opacity.
      *
+     * To customize the draw footprint in those WebGPU paths, enable `GSPLAT_CUSTOM_LOWPASS`
+     * and supply `fn getSplatLowpassVariance(viewCenter: vec3f, defaultVariance: f32) -> f32`
+     * in the same chunk. Return a nonnegative variance in squared pixels. The engine uses the
+     * trained filter for AA-compensated splats and evaluates culling with its own footprint.
+     *
      * @type {ShaderMaterial}
      * @example
      * // Set a custom parameter on all GSplat materials
