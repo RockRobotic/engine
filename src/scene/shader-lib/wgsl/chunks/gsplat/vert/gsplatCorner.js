@@ -87,6 +87,17 @@ fn initCornerCov(source: ptr<function, SplatSource>, center: ptr<function, Splat
     if (gsplatFootprintSmallerThan(cov[0][0] + GSPLAT_CULL_LOWPASS, cov[0][1], cov[1][1] + GSPLAT_CULL_LOWPASS, uniform.minPixelSize)) {
         return false;
     }
+    #ifdef GSPLAT_CUSTOM_CULL_THRESHOLDS
+        #ifdef GSPLAT_SEPARATE_OPACITY
+            let cullOpacity = getOpacity();
+        #else
+            let cullOpacity = f32(getColor().a);
+        #endif
+        let cullCov = vec3f(cov[0][0] + GSPLAT_CULL_LOWPASS, cov[0][1], cov[1][1] + GSPLAT_CULL_LOWPASS);
+        if (shouldCullProjectedSplat(v, cullCov, cullOpacity)) {
+            return false;
+        }
+    #endif
 
     // screen-space filter: the classic dilation, or for compensated splats the filter they were
     // trained with (antiAliasFilterSize is in pixels squared, cov in half pixel units)
